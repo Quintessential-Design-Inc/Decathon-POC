@@ -9,9 +9,11 @@ inspection and export, explicitly delete the sensor's offline data, and disconne
 
 The user approved the implementation plan on 7 October 2026 and then requested
 development in ten steps, one at a time, so requirements can change between steps.
-Step 1 adds the Bluetooth purpose string and primary color. The app still contains
-the starter SwiftUI screen; BLE and data handling have not been implemented or
-verified on hardware. Steps 2-10 remain planned until the user requests them.
+Steps 1-3 are implemented: Bluetooth purpose string and primary color, branded home
+screen, and an app-owned QuinKit BLE permission/availability session with logging.
+The user requested steps 2 and 3 together. Scanning, connection, event retrieval,
+and export are not implemented or verified on hardware. Steps 4-10 remain planned
+until the user requests them.
 
 ## Instructions for future agents
 
@@ -38,7 +40,9 @@ verified on hardware. Steps 2-10 remain planned until the user requests them.
   [QUIN PRO (Decathlon) Mobile App Integration Guide.pdf](<Decathon POC/Firmware Doc/QUIN PRO (Decathlon) Mobile App Integration Guide.pdf>).
   The guide has 20 pages; relevant section numbers are included below.
 - App entry point: `Decathon POC/Decathon_POCApp.swift`.
-- Starter view: `Decathon POC/ContentView.swift`.
+- Home view: `Decathon POC/ContentView.swift`.
+- App-owned BLE session: `Decathon POC/Core/BluetoothSession.swift`.
+- Shared native glass action: `Decathon POC/UI/POCActionButton.swift`.
 - Xcode project: `Decathon POC.xcodeproj`.
 - The app already links `QuinKitBLE`, `QuinKitLogger`, and `QuinKitPermissions`.
 - At review time, `Package.resolved` pins QuinKit-iOS `main` at
@@ -52,15 +56,17 @@ verified on hardware. Steps 2-10 remain planned until the user requests them.
   event data." Do not introduce a separate Info.plist while generation is enabled.
 - `AccentColor` is the single source for primary brand color `#00C8DC` in sRGB.
   The app applies this color as its root tint.
-- The user supplied `QuinLogo` as a vector PDF image asset. Preserve the original
-  asset; use it in the home screen planned for step 2.
+- The user supplied `QuinLogo` as a vector PDF image asset. The home screen preserves
+  the original artwork and places it in a fixed top-left header. The current header
+  has no dark backing or trailing label; preserve the user's styling edits.
 
 ## Visual direction
 
 - Use primary color `#00C8DC` for prominent actions, selected states, and progress.
-- Use the existing `QuinLogo` asset at the top of the home screen. The proposed
-  default is top-left; centered placement is also acceptable if the user prefers
-  it when reviewing step 2. Preserve its aspect ratio and original artwork.
+- Use the existing `QuinLogo` asset at the top-left of the home screen. Centered
+  placement remains possible if requested. Preserve its aspect ratio and artwork.
+- Keep the logo header outside the scroll view. Only the introduction, Bluetooth
+  status, helmet guidance, and discovery action below the header should scroll.
 - Prefer native Liquid Glass controls, including SwiftUI `.glass` and
   `.glassProminent` button styles where appropriate. Use system navigation and
   sheets; use custom `glassEffect` only when it improves a specific control.
@@ -109,6 +115,30 @@ independently of transient SwiftUI view rendering.
 
 QuinKitLogger is for diagnostics. Its retention-based log store must not be the
 only permanent copy of retrieved event data.
+
+### Implemented permission/session behavior (step 3)
+
+- `Decathon_POCApp` owns one `BluetoothSession` in SwiftUI `@State`. Screen updates
+  do not recreate the session or its transport.
+- Logger setup happens at app startup: console plus local persistence, seven-day
+  retention. It records app startup, permission requests/changes, transport creation,
+  Bluetooth availability changes, Settings navigation, and return-to-active refreshes.
+- Startup requests permission through `QKPermissions.request(.bluetooth)` only when
+  status is not determined. A start guard and pending-request guard prevent duplicate
+  requests; a denial does not repeatedly trigger prompts.
+- After authorization is granted, the session creates one `QKBLEManager`, with no
+  background restoration, no automatic reconnect, one simultaneous connection,
+  and no extra system power alert.
+- QuinKitBLE delegate callbacks update the observable Bluetooth availability state.
+  Permission and power are separate; readiness requires authorization plus powered-on.
+- Returning to the active scene refreshes authorization and availability, including
+  after Settings. Permission checking does not start scans or connect to devices.
+- The home screen has actionable Allow Bluetooth / Open Settings controls when
+  appropriate and power-off guidance with a manual refresh action. Request-pending,
+  unknown, resetting, unsupported, powered-off, denied, and ready states are distinct.
+- The scan button is visibly disabled with an unavailable-in-this-build explanation.
+  Step 4 will replace this boundary with actual discovery; do not add scanning to
+  the permission/session step implicitly.
 
 ## Screen 1: scanner
 
@@ -331,8 +361,8 @@ Avoid unnecessary abstractions for a two-screen POC.
 | Step | Status | Changes / deliverable | Why | User focus / notes |
 | --- | --- | --- | --- | --- |
 | 1. Project foundation | Implemented | Bluetooth purpose string in generated Info.plist for Debug/Release; `#00C8DC` AccentColor; root tint; recorded logo and Liquid Glass direction | Prepare Bluetooth access and a consistent brand color | Purpose string does not request permission by itself. Logo placement and glass controls arrive in step 2. Confirm intended iPhone OS before changing deployment target. |
-| 2. Home screen and visual foundation | Planned | Replace starter UI with branded home/scanner layout, Quin logo, scan guidance, reusable native glass action styles, and readable status/content surfaces | Establish the interface before BLE behavior is wired | Review logo placement, spacing, contrast, light/dark mode, and larger text. Do not show fabricated device readings or enabled actions that imply implemented BLE behavior. |
-| 3. BLE session, permissions, and diagnostics | Planned | App-owned long-lived QuinKitBLE session; permission/power states; Settings action; return-from-Settings refresh; configure QuinKitLogger | Centralize transport ownership and distinguish denied access from Bluetooth being off | Check first-launch prompt, denial, power changes, and lifecycle behavior. No scanning until permission and Bluetooth readiness are confirmed. |
+| 2. Home screen and visual foundation | Implemented | Branded home layout, fixed top-left Quin logo header with scrolling content below, helmet guidance, native glass action component, readable status surface, and disabled discovery control | Establish the interface and keep branding visible while scrolling | Review logo placement, spacing, contrast, light/dark mode, and larger text. No fabricated readings or working scan action are shown. |
+| 3. BLE session, permissions, and diagnostics | Implemented | App-owned long-lived QuinKitBLE session; permission/power states; Settings action; return-from-Settings refresh; persistent QuinKitLogger configuration | Centralize transport ownership and distinguish denied access from Bluetooth being off | Check first-launch prompt, denial, power changes, and lifecycle behavior on a physical iPhone. No scan or connection is started by these steps. |
 | 4. Scan and discover Decathlon devices | Planned | Manufacturer parser/filter; live scan results with battery, stored events, identity, RSSI, and last seen; scan/retry controls | Find only intended helmets and show useful information without connecting | Double-tap advertising window, malformed payloads, stale rows, duplicate updates, and count snapshot semantics. |
 | 5. Connect and prepare the profile | Planned | Selected-device connection; discover/validate full vendor UUIDs and properties; register consumers; await notification setup; connection/preparation failures | Ensure the data path is ready before any replay command | Confirm full UUIDs and actual 126-byte notification delivery on hardware. Resolve RTC format; leave undocumented RTC writes pending and visible rather than guessing. |
 | 6. Connected dashboard and disconnect | Planned | Connected identity, battery/category/temperature/update time, activity, available Device Information, count labels, and disconnect | Expose sensor state and user control on one screen | No invented battery-health value or fresh-count claim. Observe idle sleep and re-advertising after disconnect. Retrieval/export/delete controls stay unavailable until their steps are implemented; later busy states must prevent mid-transfer disconnect. |
@@ -369,6 +399,25 @@ in this document instead of proceeding automatically through the remaining steps
   access; rerunning the same build with the required access succeeded.
 - No runtime permission prompt, physical BLE behavior, or visual appearance was
   verified in this step. No unit tests were added or run.
+
+### Steps 2 and 3 verification (7 October 2026)
+
+- Final Debug simulator build passed with Xcode 27.0 and the existing resolved
+  QuinKit dependency. `git diff --check` passed.
+- Launched the actual app on the iOS 27 iPhone 17 Pro Max simulator and inspected
+  light/dark appearance and accessibility-large text. Status rows adapt vertically,
+  text wraps, the content scrolls, and the disabled native glass action remains
+  distinguishable. Original simulator appearance/text settings were restored.
+- Observed the native unsupported-Bluetooth state with permission reported as
+  granted; the app displayed availability separately rather than claiming readiness.
+- Confirmed startup, transport creation, Bluetooth availability, and foreground
+  refresh entries persisted in QuinKitLogger's SQLite store. Reactivation after
+  visiting Settings used the existing session rather than creating another transport.
+- Actual first-launch Bluetooth prompt, denial/restricted access, permission changes
+  in app Settings, and powered-off/on transitions still require a physical iPhone.
+  The simulator observation does not establish helmet discovery or connectivity.
+- VoiceOver labels/grouping are implemented but were not verified through a
+  VoiceOver walkthrough. No unit tests were added or run.
 
 Manual verification should cover permission denial, Bluetooth off, advertising
 expiry, battery/count parsing, zero/one/multiple events, packet completeness,
