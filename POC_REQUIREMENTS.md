@@ -9,7 +9,7 @@ inspection and export, explicitly delete the sensor's offline data, and disconne
 
 The user approved the implementation plan on 7 October 2026 and then requested
 development in ten steps, one at a time, so requirements can change between steps.
-Steps 1-6 are implemented: Bluetooth purpose string and primary color, branded home
+Steps 1-7 are implemented: Bluetooth purpose string and primary color, branded home
 screen with a fixed logo header, app-owned QuinKit BLE permission/availability
 session with logging, and Decathlon-filtered scanning on a separate screen opened
 by the home Scan button. The user requested steps 2
@@ -20,7 +20,10 @@ connected dashboard, battery/temperature/activity parsing, read-only major/minor
 crash thresholds, available Device Information, and disconnect/history labels.
 The user reported physical connection working on 7 October 2026. The agent has not
 observed hardware connection/subscription behavior or the new dashboard readings.
-Event retrieval and export remain planned in steps 7-10.
+Step 7 adds foreground offline replay, incremental raw journaling, validation,
+event reassembly/decoding, saved event files, and end-marker finalization. Physical
+retrieval has not been observed. Detailed progress/ETA, saved-download browsing,
+export, and deletion remain steps 8-10.
 
 ## Instructions for future agents
 
@@ -54,6 +57,10 @@ Event retrieval and export remain planned in steps 7-10.
 - Discovered Decathlon profile resolution: `Decathon POC/Core/DecathlonProfile.swift`.
 - Connected dashboard, preparation status, and UUID diagnostics: `Decathon POC/UI/HelmetConnectionView.swift`.
 - Typed readings and documented alert parser: `Decathon POC/Core/HelmetReadings.swift`.
+- Retrieval operation and interruption handling: `Decathon POC/Core/OfflineRetrieval.swift`.
+- Packet validation, per-download record assembly, and sample decoder: `Decathon POC/Core/CrashPacket.swift`.
+- Serialized durable journal/event/manifest storage: `Decathon POC/Core/OfflineDownloadStore.swift`.
+- Retrieval control and saved-event summary: `Decathon POC/UI/OfflineRetrievalCard.swift`.
 - Manufacturer parser and discovery model: `Decathon POC/Core/DiscoveredHelmet.swift`.
 - Four-field result row: `Decathon POC/UI/HelmetScanResultRow.swift`.
 - Shared native glass action: `Decathon POC/UI/POCActionButton.swift`.
@@ -343,8 +350,8 @@ documented about five seconds after connecting and on a double tap while connect
 - Keep received battery, temperature, thresholds, activity, and device information
   visible after disconnect with an explicit historical-readings notice. Reset them
   before connecting again. Explain possible idle sleep and double-tap/re-scan.
-- Retrieval, progress, persistence, export, and delete controls arrive in their
-  later steps; no command/configuration/RTC writes or battery-health metric is added.
+- Step 6 added no command/configuration/RTC writes or battery-health metric.
+  Step 7 adds retrieval/persistence; detailed progress, export, and deletion follow.
 
 ## Connection preparation and protocol commands
 
@@ -414,6 +421,67 @@ High-g samples contain Ix/Iy/Iz. Sign-extend the stored 12-bit value before appl
 0.195 g per LSB: mask with `0x0FFF`, subtract `0x1000` when >=`0x0800`.
 Early blank gyro samples can represent the inactive gyro's startup window; preserve
 that qualification rather than interpreting them as confirmed zero rotation.
+
+### Implemented retrieval behavior (step 7)
+
+- Retrieve Offline Data is enabled only for a prepared live connection after the
+  initial dashboard reads finish, with both notification consumers/subscriptions
+  already confirmed. Recheck discovered subscription state immediately before the
+  command. Allow only one operation, including a still-pending ATT write response.
+- Create a download UUID/directory and initial receiving manifest plus raw journal
+  before sending numeric byte `01` to the full discovered data characteristic.
+  Use its supported write type. Arm reception before writing so an immediate empty
+  end marker cannot be missed. An ATT response is not replay completion.
+- Save every data-channel notification in `notifications.jsonl` as sequence,
+  app receive time, and base64 bytes; synchronize each append before advancing
+  retrieval counters. Preserve malformed, unexpected/live, duplicate, conflicting,
+  and end-marker bytes. Storage runs on a serial actor, away from BLE/UI work.
+- Require 126-byte event packets, frames 1-64, IMU sensor type 01 for frames 1-60,
+  high-g sensor type 02 for frames 61-64, and a documented offline type (43/53/63
+  or defined low-power 73/83/93). Other types remain journal diagnostics and cannot
+  silently become known offline events. No BLE MTU request API or guessed packet
+  concatenation is introduced; shortened values are invalid and retained raw.
+- Serial records use download/device identity plus record ordinal, crash ID, and
+  frame inventory. A changed ID or frame 1 after a 64-frame record starts another
+  record, permitting crash-ID reuse. Identical duplicates do not advance unique
+  frames; conflicting payloads or mixed packet types prevent complete status.
+  Interleaved/reused IDs during an incomplete record are not silently merged.
+- Save per-record ordered original frames to `.bin` and decoded available samples
+  to `.json` when all 64 frames arrive, when the next record starts, and at finalization.
+  Partial records retain missing/conflicting frame metadata. A saved complete event
+  requires 64 distinct valid frames with no conflicts/header inconsistency and
+  successful synchronized writes/readback. Preserve raw and decoded SHA-256 hashes.
+- Decoder uses delivered little-endian gyro/accel axes and documented scales,
+  sign-extends high-g 12-bit values, and preserves possible unmeasured zero pre-gyro.
+  Sample time is explicitly from the start of EACH separate pre/post/high-g block;
+  no wall-clock crash time or unproven cross-buffer alignment is synthesized.
+- Finalize only on exact `01 33 55 AA`, saving the manifest after local event files.
+  An empty replay says no downloadable records, not an empty partition. End-marker
+  completion with partial/invalid records is labelled finished-with-issues in metadata.
+  Local saving failure or missing end marker requires reconnect before another request.
+- Apply a 20-second first-response timeout and a 15-second notification-stall timeout,
+  not a whole-transfer cap. Do not call local disk processing a BLE stall. Interrupted
+  downloads preserve raw journal/available event files and no automatic retry/resume.
+- Minimum protections moved forward from step 8: disable Back/Disconnect during
+  retrieval/finalization and keep the screen awake, restoring the previous idle-timer
+  setting afterward. Background/link/notification failures force partial finalization.
+- Known online-enabled crash mode (bit 02) blocks this offline-only flow to avoid
+  overlapping live crash sending. The app does not change crash mode. If the optional
+  configuration read failed, unexpected online values are still retained/flagged.
+- UI shows valid packet count, current unique frames, durably saved complete events,
+  partial/duplicate/invalid counts, saved event details, and download ID. The advertised
+  count remains a separate scan snapshot. Detailed percentage/ETA/elapsed time and
+  access to older downloads are step 8. Export is step 9; no `02` erase is added.
+
+Downloads are stored in Application Support/OfflineDownloads/<download UUID>, not
+cache. `manifest.json` schema 1 and journal timestamps use milliseconds since Unix
+epoch (JSONDecoder `.millisecondsSince1970`). Journal bytes use Codable base64 Data.
+Manifest records include device identity/information, app download/receive times,
+status, end-marker observation, journal/invalid counts, event ordinals/types,
+frame inventories, conflicts/duplicates, completeness, file names, and digests.
+If the process terminates before finalization, the manifest can still say receiving;
+the synchronized raw journal can contain more values than the last manifest snapshot.
+Step 8 must classify/reconstruct such archives conservatively. Nothing is erased.
 
 ### Progress and timing
 
@@ -513,8 +581,8 @@ Avoid unnecessary abstractions for the home, scanner, and connected-device scree
 | 4. Scan and discover Decathlon devices | Implemented | Home's bottom Scan button opens a separate scanner; match company `0x0ED6` plus signature `08 08 04 B3`; rows show only name, MAC, battery, and stored events; start on scanner entry and provide stop/retry controls | Keep discovery on its own screen and identify the documented Decathlon helmet profile without connecting | No RSSI display or cutoff. Keep last-seen data internal. Stop scanning on leaving the scanner. Consider advertising window, malformed data, stale/duplicate rows, and count snapshots. Physical discovery remains unverified. |
 | 5. Connect and prepare the profile | Implemented | Explicit result Connect action; preparation screen; discover full UUIDs, reject missing/ambiguous roles, validate properties; register both consumers and await confirmed notification setup; cancellation/error/lifecycle cleanup | Ensure the data path is ready before any replay command | User reports connection working; full UUID roles and 126-byte data delivery still require recorded hardware verification. RTC remains pending. Step 6 extends this screen into the dashboard. |
 | 6. Connected dashboard and disconnect | Implemented | Identity/connection status; cached battery read plus battery/temperature/activity notifications; read-only major/minor g thresholds; available Device Information; scan count labels; collapsible diagnostics; disconnect with retained historical readings | Expose sensor state and user control on one screen | No battery-health or fresh-count claim. Confirm actual readings and LightBlue threshold values on hardware. Observe idle sleep and re-advertising. Retrieval/export/delete are later steps. |
-| 7. Retrieve, decode, and preserve offline packets | Planned | Serialized `01` replay; raw packet journal persisted during reception; packet validation, event reassembly, duplicate/missing-frame tracking, decoder, end-marker handling | Retrieve events while preserving evidence immediately | Persistence is part of this step, not deferred to export. Check 64-frame completeness, signed high-g decoding, skipped transmitted records, and partial-transfer handling. Do not enable deletion yet. |
-| 8. Progress, saved downloads, and recovery UX | Planned | Event/packet progress, adaptive ETA, elapsed time, finalization and verified complete archives, saved-download access, timeout/error states, foreground screen-lock handling, busy guards | Make long downloads understandable and distinguish receipt from durable success | Approximately 80-85 seconds initially for ten events; count can be stale. Handle zero data, lost links, backgrounding, disk errors, and relaunch without promising firmware resume. Preserve complete data and clearly identify partial data. |
+| 7. Retrieve, decode, and preserve offline packets | Implemented | Serialized `01` replay after storage/notifications are ready; synchronized raw journal; validated record assembly and decoder; saved raw/decoded event files and manifest; end-marker/partial finalization; basic counters and essential busy/screen-lock protections | Retrieve events while preserving evidence immediately | Physical transfer, 126-byte delivery, decoding, durability, empty replay, and interruption behavior need device verification. No erase or automatic recovery. |
+| 8. Progress, saved downloads, and recovery UX | Planned | Percentage/event progress, adaptive ETA/elapsed time, catalog/access to older saved downloads, archive integrity/relaunch handling, refined timeout/error UX | Make long downloads understandable and distinguish receipt from durable success | Approximately 80-85 seconds initially for ten events; count can be stale. Step 7 already adds basic counters, timeouts, screen-lock and busy protection. Reconstruct incomplete journals conservatively and do not promise firmware resume. |
 | 9. PDF, CSV, and raw export | Planned | Reports and decoded sample export generated from saved records; original packet export; share sheet; export failure/retry | Make firmware results reviewable outside the app | Label download time accurately; original offline event date/time is missing from packets. Export must remain available after disconnect and must never delete sensor data. |
 | 10. Explicit deletion and end-to-end device review | Planned | Separate confirmed `02` erase after verified saving; wait for erase completion marker; unknown-result handling; fresh-scan verification; complete manual device walkthrough | Finish the requested lifecycle while preventing accidental loss of unsaved data | Entire partition is erased, including possible new events. A write response is not erase completion. Record actual hardware observations, recovery limits, and build/visual verification separately. |
 
@@ -621,6 +689,22 @@ in this document instead of proceeding automatically through the remaining steps
 - Hardware focus: compare major/minor values with LightBlue's 1001 read; confirm
   a connected battery notification (double-tap while connected if needed); observe
   activity changes, unavailable optional fields, and disconnect/re-scan behavior.
+
+### Step 7 verification (7 October 2026)
+
+- Debug simulator build and `git diff --check` passed. Actor-isolated disk storage,
+  nonisolated Sendable packet/metadata models, decoder, reception routing, and
+  dashboard controls compiled against the pinned QuinKit sources.
+- No unit tests, test fixtures, mock peripherals, or synthetic BLE packets were
+  added. Source review verified that the only new firmware command is numeric 01
+  on the prepared data channel; no erase/configuration/RTC write was introduced.
+- Hardware replay, first/end-marker timing, full-length notifications, raw-file
+  readback on the target phone, sample values, packet loss/duplicate cases, and
+  controlled interruptions remain unobserved. Builds do not prove these behaviors.
+- Hardware focus: retrieve existing known events, confirm 64 unique frames and
+  complete saved events, review unexpected/partial counts, and preserve the archive
+  before any later erase work. Firmware may mark records transmitted even if the
+  app loses data, so retry is not a guaranteed recovery mechanism.
 
 Manual verification should cover permission denial, Bluetooth off, advertising
 expiry, battery/count parsing, zero/one/multiple events, packet completeness,

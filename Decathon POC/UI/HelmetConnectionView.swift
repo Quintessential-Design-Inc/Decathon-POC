@@ -19,6 +19,7 @@ struct HelmetConnectionView: View {
 
                 batteryCard
                 eventsCard
+                OfflineRetrievalCard(connection: connection)
                 thresholdsCard
                 activityCard
                 deviceInformationCard
@@ -36,6 +37,7 @@ struct HelmetConnectionView: View {
                     systemImage: "xmark",
                     prominence: .secondary
                 ) { connection.disconnect() }
+                    .disabled(connection.retrieval.isBusy)
                     .padding(.horizontal, 24)
                     .padding(.vertical, 16)
                     .frame(maxWidth: 560)
@@ -45,6 +47,7 @@ struct HelmetConnectionView: View {
         }
         .navigationTitle("Your helmet")
         .navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden(connection.retrieval.isBusy)
         .toolbar(.visible, for: .navigationBar)
         .onDisappear { connection.disconnect() }
     }
@@ -172,7 +175,7 @@ struct HelmetConnectionView: View {
                     if let alert = connection.lastAlert {
                         Text("Latest alert: \(alert)").font(.caption).textSelection(.enabled)
                     }
-                    Text("RTC setup is pending until its write encoding is provided. Retrieval, export, and deletion arrive in later steps.")
+                    Text("RTC setup is pending until its write encoding is provided. Export and deletion arrive in later steps.")
                         .font(.footnote).foregroundStyle(.secondary)
                     ForEach(HelmetDeviceInfoField.allCases) { field in
                         if let issue = connection.deviceInformationIssues[field] {

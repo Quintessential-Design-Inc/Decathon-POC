@@ -32,6 +32,7 @@ enum HelmetActivity: String {
 struct HelmetCrashThresholds {
     let majorG: Int
     let minorG: Int
+    let crashMode: UInt8
     let receivedAt: Date
 
     init?(data: Data, receivedAt: Date) {
@@ -39,6 +40,7 @@ struct HelmetCrashThresholds {
         let bytes = Array(data)
         majorG = Int(bytes[1])
         minorG = Int(bytes[2])
+        crashMode = bytes[9]
         self.receivedAt = receivedAt
     }
 }

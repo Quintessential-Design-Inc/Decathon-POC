@@ -65,7 +65,7 @@ struct DecathlonProfile {
     }
 }
 
-struct ProfileError: LocalizedError {
+nonisolated struct ProfileError: LocalizedError, Sendable {
     let message: String
     init(_ message: String) { self.message = message }
     var errorDescription: String? { message }

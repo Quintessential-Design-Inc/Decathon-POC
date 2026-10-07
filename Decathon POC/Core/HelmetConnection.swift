@@ -27,6 +27,7 @@ final class HelmetConnection {
     private(set) var thresholdReadIssue: String?
     private(set) var deviceInformationIssues: [HelmetDeviceInfoField: String] = [:]
     private(set) var isReadingDashboard = false
+    let retrieval = OfflineRetrieval()
 
     @ObservationIgnored private weak var manager: QKBLEManager?
     @ObservationIgnored private var peripheral: QKPeripheral?
@@ -42,7 +43,24 @@ final class HelmetConnection {
     }
 
     var canSelectHelmet: Bool {
-        !isOperationRunning && peripheral == nil && (manager?.connectedPeripherals.isEmpty ?? true)
+        !isOperationRunning && !retrieval.isBusy && peripheral == nil && (manager?.connectedPeripherals.isEmpty ?? true)
+    }
+
+    var canRetrieveOfflineData: Bool {
+        phase == .ready && !isReadingDashboard && !retrieval.isBusy && !retrieval.requiresReconnect &&
+            peripheral?.isConnected == true && profile != nil &&
+            enabledNotificationIDs.count == 2 && (thresholds.map { $0.crashMode & 0x02 == 0 } ?? true)
+    }
+
+    func retrieveOfflineData() async {
+        guard canRetrieveOfflineData, let helmet, let peripheral, let profile else { return }
+        let context = OfflineDownloadContext(
+            id: UUID(), peripheralID: helmet.id, deviceName: helmet.name,
+            macAddress: helmet.advertisement.macAddress,
+            advertisedEventCount: helmet.advertisement.storedEventCount, startedAt: Date(),
+            deviceInformation: Dictionary(uniqueKeysWithValues: deviceInformation.map { ($0.key.rawValue, $0.value) })
+        )
+        await retrieval.start(context: context, peripheral: peripheral, profile: profile)
     }
 
     func start(helmet: DiscoveredHelmet, manager: QKBLEManager) {
@@ -65,6 +83,7 @@ final class HelmetConnection {
         thresholdReadIssue = nil
         deviceInformationIssues = [:]
         isReadingDashboard = false
+        retrieval.resetForConnection()
         let id = UUID()
         attemptID = id
         phase = .connecting
@@ -174,8 +193,7 @@ final class HelmetConnection {
                     guard !Task.isCancelled, let self, self.attemptID == attempt else { return }
                     if isData {
                         self.dataNotificationCount += 1
-                        // Raw event persistence/decoding belongs to step 7. Never send
-                        // a replay command from preparation or claim these are saved events.
+                        await self.retrieval.receive(value, at: Date())
                         QKLog.debug(tag: "Notifications", "Data notification received", value.count, self.dataNotificationCount)
                     } else {
                         self.alertNotificationCount += 1
@@ -283,6 +301,7 @@ final class HelmetConnection {
     }
 
     private func stop(with phase: ConnectionPreparationPhase) {
+        retrieval.interrupt(reason: "Connection ended before retrieval completed. \(phase.message)")
         attemptID = UUID()
         preparationTask?.cancel()
         dashboardReadTask?.cancel()
