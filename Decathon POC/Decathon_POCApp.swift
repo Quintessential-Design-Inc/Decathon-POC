@@ -14,7 +14,7 @@ struct Decathon_POCApp: App {
     @State private var bluetoothSession = BluetoothSession()
 
     init() {
-        QKLog.configure(.init(persistLogs: true, retentionDays: 7))
+        QKLog.configure(.init(persistLogs: false))
         QKLog.debug(tag: "App", "QUIN PRO POC launched")
     }
 

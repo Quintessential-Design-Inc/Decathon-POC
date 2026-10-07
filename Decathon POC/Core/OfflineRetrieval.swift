@@ -4,211 +4,247 @@ import QuinKitBLE
 import QuinKitLogger
 import UIKit
 
+/// One connection's volatile crash data and serialized retrieve/delete operations.
 @MainActor
 @Observable
 final class OfflineRetrieval {
     private(set) var phase: OfflineRetrievalPhase = .idle
+    private(set) var deletionPhase: OfflineDeletionPhase = .idle
     private(set) var receivedPacketCount = 0
     private(set) var invalidPacketCount = 0
     private(set) var duplicatePacketCount = 0
-    private(set) var storedEvents: [StoredCrashEvent] = []
+    private(set) var records: [CrashRecord] = []
     private(set) var currentFrameCount = 0
-    private(set) var downloadDirectory: URL?
-    private(set) var downloadID: UUID?
+    private(set) var sessionID: UUID?
     private(set) var requiresReconnect = false
     private(set) var receivedEndMarker = false
     private(set) var isCommandPending = false
+    private(set) var uniquePacketCount = 0
+    private(set) var eventsStarted = 0
+    private(set) var advertisedEventCount = 0
+    private(set) var startedAt: Date?
+    private(set) var finishedAt: Date?
+    private(set) var observedPacketInterval: TimeInterval = 0.12
+    private(set) var timingObservationCount = 0
 
-    @ObservationIgnored private var records: [CrashRecord] = []
-    @ObservationIgnored private var store: OfflineDownloadStore?
+    @ObservationIgnored private var assembler = CrashRecordAssembler()
+    @ObservationIgnored private var lastUniquePacketAt: Date?
+    @ObservationIgnored private var requestStartedAt: Date?
     @ObservationIgnored private var operationID = UUID()
     @ObservationIgnored private var watchdog: Task<Void, Never>?
     @ObservationIgnored private var lastNotificationAt = Date()
     @ObservationIgnored private var previousIdleTimerDisabled: Bool?
-    @ObservationIgnored private var isProcessingNotification = false
 
     deinit { watchdog?.cancel() }
 
-    var isBusy: Bool { phase == .preparing || phase == .receiving || phase == .finishing || isCommandPending }
-    var completeEventCount: Int { storedEvents.filter(\.complete).count }
-    var partialEventCount: Int { storedEvents.filter { !$0.complete }.count }
+    var isBusy: Bool { phase == .receiving || phase == .finishing || deletionPhase == .waitingForCompletion || isCommandPending }
+    var completeEventCount: Int { records.filter(\.isComplete).count }
+    var partialEventCount: Int { records.filter { !$0.isComplete }.count }
+    var hasUsableEstimate: Bool {
+        advertisedEventCount > 0 && advertisedEventCount < 255 && eventsStarted <= advertisedEventCount &&
+            uniquePacketCount <= advertisedEventCount * 64 && invalidPacketCount == 0
+    }
+    var estimatedProgress: Double? {
+        guard phase == .receiving, hasUsableEstimate else { return nil }
+        return Double(uniquePacketCount) / Double(advertisedEventCount * 64)
+    }
+    var waitingForEndMarker: Bool { phase == .receiving && hasUsableEstimate && uniquePacketCount == advertisedEventCount * 64 }
 
-    func resetForConnection() {
-        guard !isBusy else { return }
+    func elapsed(at now: Date) -> TimeInterval {
+        startedAt.map { max(0, (finishedAt ?? now).timeIntervalSince($0)) } ?? 0
+    }
+    func estimatedRemaining(at now: Date) -> TimeInterval? {
+        guard phase == .receiving, hasUsableEstimate, !waitingForEndMarker else { return nil }
+        let remainingFrames = max(0, advertisedEventCount * 64 - uniquePacketCount)
+        let startup = uniquePacketCount == 0 ? max(0, 2 - now.timeIntervalSince(requestStartedAt ?? now)) : 0
+        let gaps = max(0, advertisedEventCount - max(eventsStarted, 1))
+        return startup + Double(remainingFrames) * (timingObservationCount >= 5 ? observedPacketInterval : 0.12) + Double(gaps) * 0.2
+    }
+
+    /// End of connection/backgrounding: release all packet data and invalidate late writes.
+    func clearSession() {
+        operationID = UUID()
+        watchdog?.cancel()
+        watchdog = nil
+        restoreIdleTimer()
         phase = .idle
+        deletionPhase = .idle
         receivedPacketCount = 0
         invalidPacketCount = 0
         duplicatePacketCount = 0
-        storedEvents = []
         records = []
+        assembler = CrashRecordAssembler()
         currentFrameCount = 0
-        downloadDirectory = nil
-        downloadID = nil
+        sessionID = nil
         requiresReconnect = false
         receivedEndMarker = false
+        isCommandPending = false
+        uniquePacketCount = 0
+        eventsStarted = 0
+        advertisedEventCount = 0
+        startedAt = nil
+        finishedAt = nil
+        observedPacketInterval = 0.12
+        timingObservationCount = 0
+        lastUniquePacketAt = nil
+        requestStartedAt = nil
     }
 
-    func start(context: OfflineDownloadContext, peripheral: QKPeripheral, profile: DecathlonProfile) async {
-        guard !isBusy, !requiresReconnect else { return }
-        resetForConnection()
+    func start(advertisedCount: Int, peripheral: QKPeripheral, profile: DecathlonProfile) async {
+        guard phase == .idle, !isBusy, !requiresReconnect else { return }
+        sessionID = UUID()
         operationID = UUID()
-        let id = operationID
-        downloadID = context.id
-        phase = .preparing
-        previousIdleTimerDisabled = UIApplication.shared.isIdleTimerDisabled
-        UIApplication.shared.isIdleTimerDisabled = true
-        let writer = OfflineDownloadStore()
-        store = writer
+        let operation = operationID
+        advertisedEventCount = advertisedCount
+        startedAt = Date()
+        keepScreenAwake()
         do {
-            downloadDirectory = try await writer.open(context: context)
-            guard operationID == id, phase == .preparing else { return }
-            guard peripheral.isConnected,
-                  peripheral.characteristic(serviceUUID: profile.data.serviceUUID, uuid: profile.data.uuid)?.isNotifying == true,
-                  peripheral.characteristic(serviceUUID: profile.alerts.serviceUUID, uuid: profile.alerts.uuid)?.isNotifying == true else {
-                throw StoreError("Connection or notification channels are no longer ready.")
-            }
-            // Arm reception and storage BEFORE writing: an empty replay can end immediately.
+            try validateChannels(peripheral, profile)
+            // Arm reception before writing: an empty replay can end immediately.
             phase = .receiving
             lastNotificationAt = Date()
-            startWatchdog(operation: id)
-            QKLog.debug(tag: "Offline", "Sending offline retrieval command 01", context.id, profile.data.id)
+            requestStartedAt = lastNotificationAt
+            startWatchdog(operation: operation, deleting: false)
             isCommandPending = true
             defer {
-                isCommandPending = false
-                if phase == .completed || phase.isFailure { restoreIdleTimer() }
-            }
-            try await peripheral.writeValue(Data([0x01]), for: profile.data, type: profile.dataWriteType, timeout: 10)
-            // ATT acknowledgment is not replay completion; only the end marker closes it.
-        } catch {
-            guard operationID == id, isBusy, phase != .finishing else { return }
-            await finish(endMarker: false, issue: "Could not start retrieval. \(error.localizedDescription)")
-        }
-    }
-
-    func receive(_ data: Data, at date: Date) async {
-        guard phase == .receiving, let store else { return }
-        isProcessingNotification = true
-        defer { isProcessingNotification = false }
-        let id = operationID
-        lastNotificationAt = date
-        do {
-            try await store.append(data, receivedAt: date)
-            guard operationID == id, phase == .receiving else { return }
-            if data == CrashPacket.endMarker {
-                receivedEndMarker = true
-                await finish(endMarker: true, issue: nil)
-                return
-            }
-            let packet: CrashPacket
-            do { packet = try CrashPacket(data: data) }
-            catch {
-                invalidPacketCount += 1
-                QKLog.error(tag: "Offline", "Invalid or non-offline notification retained in raw journal", data.count, error)
-                return
-            }
-            receivedPacketCount += 1
-            // Records are serial on this firmware. An ordinal disambiguates reuse of
-            // the opaque crash ID, including a new frame 1 after a completed record.
-            if records.last == nil || records.last?.crashID != packet.crashID ||
-                (packet.frame == 1 && records.last?.frames.count == 64) {
-                if let previous = records.last {
-                    let saved = try await store.save(previous)
-                    guard operationID == id, phase == .receiving else { return }
-                    remember(saved)
+                if operationID == operation {
+                    isCommandPending = false
+                    if phase != .receiving { restoreIdleTimer() }
                 }
-                records.append(CrashRecord(packet: packet, ordinal: records.count + 1, receivedAt: date))
             }
-            let index = records.count - 1
-            let duplicatesBefore = records[index].duplicateCount
-            records[index].add(packet, at: date)
-            duplicatePacketCount += records[index].duplicateCount - duplicatesBefore
-            currentFrameCount = records[index].frames.count
-            if records[index].frames.count == 64 {
-                let saved = try await store.save(records[index])
-                guard operationID == id, phase == .receiving else { return }
-                remember(saved)
-            }
+            QKLog.debug(tag: "Offline", "Requesting session-only offline data", profile.data.id)
+            try await peripheral.writeValue(Data([0x01]), for: profile.data, type: profile.dataWriteType, timeout: 10)
         } catch {
-            guard operationID == id, phase == .receiving else { return }
-            QKLog.error(tag: "Offline", "Could not preserve received data", error)
-            await finish(endMarker: false, issue: "Local saving failed. \(error.localizedDescription)")
+            guard operationID == operation, !receivedEndMarker else { return }
+            finishRetrieval(endMarker: false, issue: "Could not start retrieval. \(error.localizedDescription)")
         }
     }
 
-    /// Forced link/lifecycle loss: keep the journal and partial records; no auto retry.
-    func interrupt(reason: String) {
-        guard phase == .preparing || phase == .receiving else { return }
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            await self.finish(endMarker: false, issue: reason)
-        }
-        // Invalidate an awaiting append/command before it can mutate this operation.
-        phase = .finishing
-        watchdog?.cancel()
-    }
-
-    private func finish(endMarker: Bool, issue: String?) async {
-        guard phase != .idle && phase != .completed && !phase.isFailure else { return }
-        phase = .finishing
-        watchdog?.cancel()
-        watchdog = nil
-        operationID = UUID()
-        var finalIssue = issue
-        guard let store else {
-            phase = .failed(issue ?? "Download storage is unavailable.")
-            requiresReconnect = true
-            restoreIdleTimer()
+    func receive(_ data: Data, at date: Date) {
+        if deletionPhase == .waitingForCompletion {
+            if data == CrashPacket.endMarker {
+                deletionPhase = .completed
+                watchdog?.cancel()
+                if !isCommandPending { restoreIdleTimer() }
+                QKLog.debug(tag: "Offline", "Helmet confirmed offline partition erase")
+            } else {
+                failDeletion("Unexpected data arrived while waiting for erase completion. The erase result is unknown.")
+            }
             return
         }
-        for record in records {
-            do { remember(try await store.save(record)) }
-            catch {
-                finalIssue = [finalIssue, "Could not save event \(record.ordinal): \(error.localizedDescription)"].compactMap { $0 }.joined(separator: " ")
+        guard phase == .receiving else { return }
+        lastNotificationAt = date
+        if data == CrashPacket.endMarker {
+            finishRetrieval(endMarker: true, issue: nil)
+            return
+        }
+        guard let packet = try? CrashPacket(data: data) else {
+            invalidPacketCount += 1
+            QKLog.error(tag: "Offline", "Invalid or non-offline notification", data.count)
+            return
+        }
+        receivedPacketCount += 1
+        let previousUniqueCount = uniquePacketCount
+        let previousEventCount = eventsStarted
+        assembler.add(packet, at: date)
+        records = assembler.records
+        uniquePacketCount = assembler.uniqueFrameCount
+        eventsStarted = records.count
+        duplicatePacketCount = assembler.duplicateCount
+        currentFrameCount = records.last?.frames.count ?? 0
+        if uniquePacketCount > previousUniqueCount {
+            if eventsStarted == previousEventCount, let lastUniquePacketAt {
+                let interval = date.timeIntervalSince(lastUniquePacketAt)
+                if (0.02...2).contains(interval) {
+                    observedPacketInterval = 0.85 * observedPacketInterval + 0.15 * interval
+                    timingObservationCount += 1
+                }
             }
+            lastUniquePacketAt = date
         }
-        let hasIssues = finalIssue != nil || invalidPacketCount > 0 || partialEventCount > 0
+    }
+
+    func deleteOfflineData(peripheral: QKPeripheral, profile: DecathlonProfile) async {
+        guard phase == .completed, receivedEndMarker, !isBusy, !requiresReconnect, deletionPhase == .idle else { return }
+        operationID = UUID()
+        let operation = operationID
         do {
-            let manifest = try await store.finish(
-                status: endMarker ? (hasIssues ? "finished-with-issues" : "completed") : "interrupted",
-                endMarker: endMarker, invalidCount: invalidPacketCount, issue: finalIssue
-            )
-            storedEvents = manifest.events
-            receivedEndMarker = endMarker
-            requiresReconnect = !endMarker || finalIssue != nil
-            phase = finalIssue.map { .failed($0) } ?? (endMarker ? .completed : .failed("Retrieval was interrupted."))
-            QKLog.debug(tag: "Offline", "Retrieval finalized", manifest.context.id, manifest.status,
-                        completeEventCount, partialEventCount, invalidPacketCount)
+            try validateChannels(peripheral, profile)
+            keepScreenAwake()
+            deletionPhase = .waitingForCompletion
+            lastNotificationAt = Date()
+            startWatchdog(operation: operation, deleting: true)
+            isCommandPending = true
+            defer {
+                if operationID == operation {
+                    isCommandPending = false
+                    if deletionPhase != .waitingForCompletion { restoreIdleTimer() }
+                }
+            }
+            QKLog.debug(tag: "Offline", "User confirmed offline partition erase; writing 02", profile.data.id)
+            try await peripheral.writeValue(Data([0x02]), for: profile.data, type: profile.dataWriteType, timeout: 10)
         } catch {
-            phase = .failed("Could not finalize saved download. \(error.localizedDescription)")
-            requiresReconnect = true
-            QKLog.error(tag: "Offline", "Download finalization failed", error)
+            guard operationID == operation, deletionPhase != .completed else { return }
+            failDeletion("Erase command failed or was not confirmed. Result is unknown. \(error.localizedDescription)")
         }
-        self.store = nil
+    }
+
+    private func validateChannels(_ peripheral: QKPeripheral, _ profile: DecathlonProfile) throws {
+        guard peripheral.isConnected,
+              peripheral.characteristic(serviceUUID: profile.data.serviceUUID, uuid: profile.data.uuid)?.isNotifying == true,
+              peripheral.characteristic(serviceUUID: profile.alerts.serviceUUID, uuid: profile.alerts.uuid)?.isNotifying == true else {
+            throw ProfileError("Connection or notification channels are not ready.")
+        }
+    }
+
+    private func finishRetrieval(endMarker: Bool, issue: String?) {
+        phase = .finishing
+        watchdog?.cancel()
+        receivedEndMarker = endMarker
+        requiresReconnect = !endMarker
+        finishedAt = Date()
+        phase = issue.map { .failed($0) } ?? .completed
         if !isCommandPending { restoreIdleTimer() }
+        QKLog.debug(tag: "Offline", "Session retrieval ended", completeEventCount, partialEventCount, invalidPacketCount, endMarker)
     }
 
-    private func remember(_ event: StoredCrashEvent) {
-        storedEvents.removeAll { $0.ordinal == event.ordinal }
-        storedEvents.append(event)
-        storedEvents.sort { $0.ordinal < $1.ordinal }
+    private func failDeletion(_ message: String) {
+        deletionPhase = .failed(message)
+        requiresReconnect = true
+        watchdog?.cancel()
+        if !isCommandPending { restoreIdleTimer() }
+        QKLog.error(tag: "Offline", "Erase result unknown", message)
     }
 
-    private func startWatchdog(operation: UUID) {
+    private func startWatchdog(operation: UUID, deleting: Bool) {
+        watchdog?.cancel()
         watchdog = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 do { try await Task.sleep(for: .seconds(1)) } catch { return }
-                guard let self, self.operationID == operation, self.phase == .receiving else { return }
-                if self.isProcessingNotification { continue }
-                // Per-response/stall timeout, never a short total-duration limit.
-                let timeout: TimeInterval = self.receivedPacketCount == 0 && self.invalidPacketCount == 0 ? 20 : 15
-                if Date().timeIntervalSince(self.lastNotificationAt) > timeout {
-                    await self.finish(endMarker: false, issue: "The helmet stopped responding before the end marker. Partial data was retained. Reconnect before retrying; firmware may skip records already transmitted.")
-                    return
+                guard let self, self.operationID == operation else { return }
+                if deleting {
+                    guard self.deletionPhase == .waitingForCompletion else { return }
+                    // App policy, not a documented firmware erase duration.
+                    if Date().timeIntervalSince(self.lastNotificationAt) > 60 {
+                        self.failDeletion("No erase completion marker arrived within 60 seconds. Result is unknown; reconnect before another command.")
+                        return
+                    }
+                } else {
+                    guard self.phase == .receiving else { return }
+                    let initial = self.receivedPacketCount == 0 && self.invalidPacketCount == 0
+                    if Date().timeIntervalSince(self.lastNotificationAt) > (initial ? 20 : 15) {
+                        self.finishRetrieval(endMarker: false, issue: initial ? "No initial response within 20 seconds. Export any available data before disconnecting; retry may skip already transmitted records." : "No new data for 15 seconds before the end marker. Export the partial data before disconnecting; retry may skip already transmitted records.")
+                        return
+                    }
                 }
             }
         }
     }
 
+    private func keepScreenAwake() {
+        if previousIdleTimerDisabled == nil { previousIdleTimerDisabled = UIApplication.shared.isIdleTimerDisabled }
+        UIApplication.shared.isIdleTimerDisabled = true
+    }
     private func restoreIdleTimer() {
         if let previousIdleTimerDisabled { UIApplication.shared.isIdleTimerDisabled = previousIdleTimerDisabled }
         previousIdleTimerDisabled = nil
@@ -216,17 +252,20 @@ final class OfflineRetrieval {
 }
 
 enum OfflineRetrievalPhase: Equatable {
-    case idle, preparing, receiving, finishing, completed
+    case idle, receiving, finishing, completed
     case failed(String)
-    var isFailure: Bool { if case .failed = self { true } else { false } }
     var title: String {
         switch self {
         case .idle: "Ready to retrieve"
-        case .preparing: "Preparing local storage"
         case .receiving: "Retrieving offline data"
-        case .finishing: "Saving download"
+        case .finishing: "Checking received frames"
         case .completed: "Replay finished"
         case .failed: "Retrieval interrupted"
         }
     }
+}
+
+enum OfflineDeletionPhase: Equatable {
+    case idle, waitingForCompletion, completed
+    case failed(String)
 }

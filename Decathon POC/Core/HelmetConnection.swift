@@ -28,6 +28,8 @@ final class HelmetConnection {
     private(set) var deviceInformationIssues: [HelmetDeviceInfoField: String] = [:]
     private(set) var isReadingDashboard = false
     let retrieval = OfflineRetrieval()
+    private(set) var csvExportID: UUID?
+    private(set) var sessionDataNotice: String?
 
     @ObservationIgnored private weak var manager: QKBLEManager?
     @ObservationIgnored private var peripheral: QKPeripheral?
@@ -43,24 +45,48 @@ final class HelmetConnection {
     }
 
     var canSelectHelmet: Bool {
-        !isOperationRunning && !retrieval.isBusy && peripheral == nil && (manager?.connectedPeripherals.isEmpty ?? true)
+        !isOperationRunning && !retrieval.isBusy && csvExportID == nil && peripheral == nil && (manager?.connectedPeripherals.isEmpty ?? true)
     }
 
     var canRetrieveOfflineData: Bool {
-        phase == .ready && !isReadingDashboard && !retrieval.isBusy && !retrieval.requiresReconnect &&
+        phase == .ready && !isReadingDashboard && csvExportID == nil && retrieval.phase == .idle && !retrieval.isBusy && !retrieval.requiresReconnect &&
             peripheral?.isConnected == true && profile != nil &&
             enabledNotificationIDs.count == 2 && (thresholds.map { $0.crashMode & 0x02 == 0 } ?? true)
     }
 
     func retrieveOfflineData() async {
         guard canRetrieveOfflineData, let helmet, let peripheral, let profile else { return }
-        let context = OfflineDownloadContext(
-            id: UUID(), peripheralID: helmet.id, deviceName: helmet.name,
-            macAddress: helmet.advertisement.macAddress,
-            advertisedEventCount: helmet.advertisement.storedEventCount, startedAt: Date(),
-            deviceInformation: Dictionary(uniqueKeysWithValues: deviceInformation.map { ($0.key.rawValue, $0.value) })
-        )
-        await retrieval.start(context: context, peripheral: peripheral, profile: profile)
+        await retrieval.start(advertisedCount: helmet.advertisement.storedEventCount, peripheral: peripheral, profile: profile)
+    }
+
+    var canExportCSV: Bool {
+        phase == .ready && !retrieval.isBusy && csvExportID == nil && !retrieval.records.isEmpty
+    }
+
+    var canDeleteOfflineData: Bool {
+        phase == .ready && csvExportID == nil && !retrieval.isBusy && !retrieval.requiresReconnect &&
+            retrieval.phase == .completed && retrieval.receivedEndMarker && retrieval.deletionPhase == .idle &&
+            peripheral?.isConnected == true && profile != nil
+    }
+
+    func deleteOfflineData() async {
+        guard canDeleteOfflineData, let peripheral, let profile else { return }
+        await retrieval.deleteOfflineData(peripheral: peripheral, profile: profile)
+    }
+
+    func beginCSVExport() -> (UUID, SessionCSVSnapshot)? {
+        guard canExportCSV, let helmet, let sessionID = retrieval.sessionID, let started = retrieval.startedAt else { return nil }
+        let id = UUID()
+        csvExportID = id
+        return (id, SessionCSVSnapshot(sessionID: sessionID, deviceName: helmet.name,
+                                      macAddress: helmet.advertisement.macAddress,
+                                      firmwareVersion: deviceInformation[.firmware] ?? "", downloadStartedAt: started,
+                                      receivedEndMarker: retrieval.receivedEndMarker,
+                                      invalidPacketCount: retrieval.invalidPacketCount, records: retrieval.records))
+    }
+
+    func finishCSVExport(_ id: UUID) {
+        if csvExportID == id { csvExportID = nil }
     }
 
     func start(helmet: DiscoveredHelmet, manager: QKBLEManager) {
@@ -83,7 +109,8 @@ final class HelmetConnection {
         thresholdReadIssue = nil
         deviceInformationIssues = [:]
         isReadingDashboard = false
-        retrieval.resetForConnection()
+        retrieval.clearSession()
+        sessionDataNotice = nil
         let id = UUID()
         attemptID = id
         phase = .connecting
@@ -193,7 +220,7 @@ final class HelmetConnection {
                     guard !Task.isCancelled, let self, self.attemptID == attempt else { return }
                     if isData {
                         self.dataNotificationCount += 1
-                        await self.retrieval.receive(value, at: Date())
+                        self.retrieval.receive(value, at: Date())
                         QKLog.debug(tag: "Notifications", "Data notification received", value.count, self.dataNotificationCount)
                     } else {
                         self.alertNotificationCount += 1
@@ -301,7 +328,12 @@ final class HelmetConnection {
     }
 
     private func stop(with phase: ConnectionPreparationPhase) {
-        retrieval.interrupt(reason: "Connection ended before retrieval completed. \(phase.message)")
+        if retrieval.sessionID != nil {
+            sessionDataNotice = retrieval.deletionPhase == .waitingForCompletion
+                ? "The connection ended before erase completion was confirmed. The device's erase result is unknown. Session data was cleared."
+                : "Connection ended. Retrieved session data was cleared from memory."
+        }
+        retrieval.clearSession()
         attemptID = UUID()
         preparationTask?.cancel()
         dashboardReadTask?.cancel()

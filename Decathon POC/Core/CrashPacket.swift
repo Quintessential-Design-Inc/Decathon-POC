@@ -18,7 +18,7 @@ nonisolated struct CrashPacket: Sendable {
         guard (1...64).contains(frame), sensorType == (frame <= 60 ? 0x01 : 0x02) else {
             throw ProfileError("Invalid frame number or sensor type.")
         }
-        // Live/unknown payloads remain in the journal but cannot become offline events.
+        // Live/unknown payloads cannot become offline events.
         guard [UInt8(0x43), 0x53, 0x63, 0x73, 0x83, 0x93].contains(packetType) else {
             throw ProfileError("Unexpected offline packet type \(String(format: "%02X", packetType)).")
         }
@@ -118,14 +118,30 @@ nonisolated struct CrashRecord: Sendable {
     }
 }
 
-nonisolated struct DecodedCrashRecord: Codable, Sendable {
+/// Assemble one connection's in-memory crash records, preserving ambiguous boundaries.
+nonisolated struct CrashRecordAssembler: Sendable {
+    private(set) var records: [CrashRecord] = []
+    var uniqueFrameCount: Int { records.reduce(0) { $0 + $1.frames.count } }
+    var duplicateCount: Int { records.reduce(0) { $0 + $1.duplicateCount } }
+
+    mutating func add(_ packet: CrashPacket, at date: Date) {
+        if records.last == nil || records.last?.crashID != packet.crashID ||
+            (packet.frame == 1 && (records.last?.frames.count == 64 || records.last?.frames[1] == nil)) {
+            records.append(CrashRecord(packet: packet, ordinal: records.count + 1, receivedAt: date))
+        }
+        let index = records.count - 1
+        records[index].add(packet, at: date)
+    }
+}
+
+nonisolated struct DecodedCrashRecord: Codable, Equatable, Sendable {
     let crashID: String
     let ordinal: Int
     let imu: [DecodedIMUSample]
     let highG: [DecodedHighGSample]
 }
 
-nonisolated struct DecodedIMUSample: Codable, Sendable {
+nonisolated struct DecodedIMUSample: Codable, Equatable, Sendable {
     let frame: Int
     let indexWithinBlock: Int
     let block: String
@@ -135,7 +151,7 @@ nonisolated struct DecodedIMUSample: Codable, Sendable {
     let gyroMayBeUnmeasured: Bool
 }
 
-nonisolated struct DecodedHighGSample: Codable, Sendable {
+nonisolated struct DecodedHighGSample: Codable, Equatable, Sendable {
     let frame: Int
     let indexWithinBlock: Int
     let secondsFromBlockStart: Double

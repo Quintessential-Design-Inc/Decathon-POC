@@ -37,7 +37,7 @@ struct HelmetConnectionView: View {
                     systemImage: "xmark",
                     prominence: .secondary
                 ) { connection.disconnect() }
-                    .disabled(connection.retrieval.isBusy)
+                    .disabled(connection.retrieval.isBusy || connection.csvExportID != nil)
                     .padding(.horizontal, 24)
                     .padding(.vertical, 16)
                     .frame(maxWidth: 560)
@@ -47,9 +47,13 @@ struct HelmetConnectionView: View {
         }
         .navigationTitle("Your helmet")
         .navigationBarTitleDisplayMode(.inline)
-        .navigationBarBackButtonHidden(connection.retrieval.isBusy)
+        .navigationBarBackButtonHidden(connection.retrieval.isBusy || connection.csvExportID != nil)
         .toolbar(.visible, for: .navigationBar)
-        .onDisappear { connection.disconnect() }
+        .onDisappear {
+            // A sharing presentation can cover this screen; its payload belongs
+            // to the current session until sharing finishes.
+            if connection.csvExportID == nil { connection.disconnect() }
+        }
     }
 
     private var identity: some View {
@@ -175,7 +179,7 @@ struct HelmetConnectionView: View {
                     if let alert = connection.lastAlert {
                         Text("Latest alert: \(alert)").font(.caption).textSelection(.enabled)
                     }
-                    Text("RTC setup is pending until its write encoding is provided. Export and deletion arrive in later steps.")
+                    Text("RTC setup is pending until its write encoding is provided. Retrieved crash data exists only for this connection and is cleared when it ends.")
                         .font(.footnote).foregroundStyle(.secondary)
                     ForEach(HelmetDeviceInfoField.allCases) { field in
                         if let issue = connection.deviceInformationIssues[field] {
