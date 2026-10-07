@@ -26,7 +26,8 @@ actor SessionCSVExporter {
             "event_first_received_at", "event_ordinal", "crash_id", "packet_type_hex", "classification",
             "event_complete", "missing_frames", "conflicting_frames", "duplicate_packets", "inconsistent_header",
             "transfer_end_marker", "transfer_invalid_packets", "sample_block", "frame", "sample_index_in_block",
-            "seconds_from_block_start", "gx_dps", "gy_dps", "gz_dps", "ax_g", "ay_g", "az_g", "ix_g", "iy_g", "iz_g", "gyro_may_be_unmeasured"
+            "seconds_from_block_start", "gx_dps", "gy_dps", "gz_dps", "ax_g", "ay_g", "az_g", "ix_g", "iy_g", "iz_g", "gyro_may_be_unmeasured",
+            "raw_packet_hex"
         ]
         var csv = Data((header.joined(separator: ",") + "\r\n").utf8)
         let dates = ISO8601DateFormatter()
@@ -42,14 +43,20 @@ actor SessionCSVExporter {
                 String(record.inconsistentHeader), String(snapshot.receivedEndMarker), String(snapshot.invalidPacketCount)
             ]
             let decoded = record.decoded()
+            // Samples from one frame share its complete original BLE packet.
+            let rawPacketHex = record.frames.mapValues { packet in
+                packet.map { String(format: "%02X", $0) }.joined(separator: " ")
+            }
             for sample in decoded.imu {
                 append(prefix + [sample.block, String(sample.frame), String(sample.indexWithinBlock),
                                  number(sample.secondsFromBlockStart), number(sample.gxDPS), number(sample.gyDPS), number(sample.gzDPS),
-                                 number(sample.axG), number(sample.ayG), number(sample.azG), "", "", "", String(sample.gyroMayBeUnmeasured)], to: &csv)
+                                 number(sample.axG), number(sample.ayG), number(sample.azG), "", "", "", String(sample.gyroMayBeUnmeasured),
+                                 rawPacketHex[sample.frame] ?? ""], to: &csv)
             }
             for sample in decoded.highG {
                 append(prefix + ["high_g", String(sample.frame), String(sample.indexWithinBlock), number(sample.secondsFromBlockStart),
-                                 "", "", "", "", "", "", number(sample.ixG), number(sample.iyG), number(sample.izG), ""], to: &csv)
+                                 "", "", "", "", "", "", number(sample.ixG), number(sample.iyG), number(sample.izG), "",
+                                 rawPacketHex[sample.frame] ?? ""], to: &csv)
             }
         }
         let name = "QUIN-PRO-\(snapshot.sessionID.uuidString).csv"

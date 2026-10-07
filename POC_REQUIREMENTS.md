@@ -254,6 +254,10 @@ CSV is UTF-8 with quoted/escaped fields and CRLF rows, one row per available sam
   conflicting frames, duplicate count, header consistency, end-marker/invalid counts.
 - Sample block, frame, index within that block, seconds from that block's start.
 - Gyro XYZ in dps, IMU acceleration XYZ in g, high-g XYZ in g, possible unmeasured gyro.
+- `raw_packet_hex`: the full original 126-byte packet (header and payload) as
+  uppercase, space-separated hex, repeated for each sample decoded from that frame.
+  This is the retained packet used for decoding; conflicting alternatives and
+  invalid notifications are represented by quality flags/counts, not extra raw rows.
 
 Frames 1–30 contain 300 pre-IMU samples at 104 Hz; 31–60 contain 300 post-IMU samples
 at 52 Hz; 61–64 contain 80 high-g samples at ~1 kHz. Decode delivered little-endian
