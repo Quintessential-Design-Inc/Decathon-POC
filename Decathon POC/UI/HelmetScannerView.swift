@@ -2,6 +2,7 @@ import SwiftUI
 
 struct HelmetScannerView: View {
     let session: BluetoothSession
+    @State private var isShowingConnection = false
 
     var body: some View {
         ScrollView {
@@ -25,7 +26,15 @@ struct HelmetScannerView: View {
                 accessAction
 
                 ForEach(session.discoveredHelmets) { helmet in
-                    HelmetScanResultRow(helmet: helmet)
+                    HelmetScanResultRow(
+                        helmet: helmet,
+                        canConnect: session.isBluetoothReady && !session.isStartingScan && session.connection.canSelectHelmet
+                    ) {
+                        session.connect(to: helmet)
+                        if session.connection.helmet?.id == helmet.id, session.connection.phase.isPreparing {
+                            isShowingConnection = true
+                        }
+                    }
                 }
 
                 if !session.discoveredHelmets.isEmpty {
@@ -51,11 +60,17 @@ struct HelmetScannerView: View {
         .navigationTitle("Nearby helmets")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar)
+        .navigationDestination(isPresented: $isShowingConnection) {
+            HelmetConnectionView(connection: session.connection)
+        }
         .task {
             await session.enterScanner()
         }
         .onDisappear {
             session.leaveScanner()
+        }
+        .onChange(of: session.connection.canSelectHelmet) { _, canSelect in
+            if canSelect { session.refresh() }
         }
     }
 
@@ -71,7 +86,7 @@ struct HelmetScannerView: View {
                 Task { await session.startScan() }
             }
         }
-        .disabled(!session.isBluetoothReady || session.isStartingScan)
+        .disabled(!session.isBluetoothReady || session.isStartingScan || !session.connection.canSelectHelmet)
         .opacity(session.isBluetoothReady ? 1 : 0.55)
     }
 
@@ -105,6 +120,9 @@ struct HelmetScannerView: View {
 
     private var scanMessage: String {
         guard session.isBluetoothReady else { return session.readiness.message }
+        if session.connection.isOperationRunning {
+            return "Finishing the previous connection attempt. Scanning will be available shortly."
+        }
 
         switch session.scanPhase {
         case .idle:

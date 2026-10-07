@@ -4,7 +4,7 @@ import QuinKitBLE
 import QuinKitLogger
 import QuinKitPermissions
 
-/// App-owned transport and discovery lifetime. Connection and commands arrive later.
+/// App-owned transport, discovery, and selected-device connection lifetime.
 @MainActor
 @Observable
 final class BluetoothSession: QKBLEManagerDelegate {
@@ -14,6 +14,7 @@ final class BluetoothSession: QKBLEManagerDelegate {
     private(set) var scanPhase: HelmetScanPhase = .idle
     private(set) var discoveredHelmets: [DiscoveredHelmet] = []
     private(set) var isStartingScan = false
+    let connection = HelmetConnection()
 
     @ObservationIgnored
     private(set) var manager: QKBLEManager?
@@ -91,6 +92,9 @@ final class BluetoothSession: QKBLEManagerDelegate {
 
     func didEnterBackground() {
         isForeground = false
+        if connection.phase.isPreparing || connection.phase == .ready {
+            connection.disconnect(reason: "Connection closed while the app was in the background. Return to nearby helmets, double-tap the helmet, and scan again.")
+        }
         if scanPhase == .scanning || isStartingScan {
             needsAutomaticScan = true
             interruptScan()
@@ -155,7 +159,7 @@ final class BluetoothSession: QKBLEManagerDelegate {
     func startScan() async {
         refresh()
         guard isScannerVisible, isForeground, isBluetoothReady, let manager,
-              !isStartingScan, scanPhase != .scanning else { return }
+              !isStartingScan, scanPhase != .scanning, connection.canSelectHelmet else { return }
 
         needsAutomaticScan = false
         scanRequestActive = true
@@ -202,6 +206,14 @@ final class BluetoothSession: QKBLEManagerDelegate {
         QKLog.debug(tag: "Scan", "User stopped scan", discoveredHelmets.count)
     }
 
+    func connect(to helmet: DiscoveredHelmet) {
+        refresh()
+        guard isScannerVisible, isForeground, isBluetoothReady, let manager,
+              !isStartingScan, connection.canSelectHelmet else { return }
+        stopScan()
+        connection.start(helmet: helmet, manager: manager)
+    }
+
     func openSettings() {
         QKLog.debug(tag: "Bluetooth", "Opening app Settings")
         QKPermissions.openSettings()
@@ -227,6 +239,10 @@ final class BluetoothSession: QKBLEManagerDelegate {
         }
     }
 
+    func bleManager(_ manager: QKBLEManager, didDisconnect peripheral: QKPeripheral, error: QKBLEError?) {
+        connection.handleDisconnect(peripheralID: peripheral.id, error: error)
+    }
+
     func bleManagerDidStopScan(_ manager: QKBLEManager) {
         let completedScanID = scanID
         // QuinKit may report scan-stop immediately before its power-state callback.
@@ -246,7 +262,8 @@ final class BluetoothSession: QKBLEManagerDelegate {
 
     private func scheduleAutomaticScanIfNeeded() {
         guard isScannerVisible, isForeground, needsAutomaticScan, isBluetoothReady,
-              !isStartingScan, scanPhase != .scanning, automaticScanTask == nil else { return }
+              !isStartingScan, scanPhase != .scanning, automaticScanTask == nil,
+              connection.canSelectHelmet else { return }
         automaticScanTask = Task { @MainActor [weak self] in
             guard let self else { return }
             await self.startScan()
@@ -302,6 +319,9 @@ final class BluetoothSession: QKBLEManagerDelegate {
     }
 
     private func handleBluetoothUnavailable() {
+        if connection.phase.isPreparing || connection.phase == .ready {
+            connection.disconnect(reason: "Bluetooth became unavailable. Restore Bluetooth access, then double-tap the helmet and scan again.")
+        }
         if scanPhase == .scanning || isStartingScan {
             needsAutomaticScan = true
             interruptScan()

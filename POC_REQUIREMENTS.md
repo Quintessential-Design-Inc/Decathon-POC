@@ -9,13 +9,18 @@ inspection and export, explicitly delete the sensor's offline data, and disconne
 
 The user approved the implementation plan on 7 October 2026 and then requested
 development in ten steps, one at a time, so requirements can change between steps.
-Steps 1-4 are implemented: Bluetooth purpose string and primary color, branded home
+Steps 1-6 are implemented: Bluetooth purpose string and primary color, branded home
 screen with a fixed logo header, app-owned QuinKit BLE permission/availability
 session with logging, and Decathlon-filtered scanning on a separate screen opened
 by the home Scan button. The user requested steps 2
 and 3 together, then authorized step 4 after restricting scan rows to name, MAC,
-battery, and event count. Physical helmet discovery has not been verified.
-Connection, event retrieval, and export remain planned in steps 5-10.
+battery, and event count. Step 5 adds explicit selected-device connection, discovered
+UUID/property validation, and confirmed data/alert subscriptions. Step 6 adds the
+connected dashboard, battery/temperature/activity parsing, read-only major/minor
+crash thresholds, available Device Information, and disconnect/history labels.
+The user reported physical connection working on 7 October 2026. The agent has not
+observed hardware connection/subscription behavior or the new dashboard readings.
+Event retrieval and export remain planned in steps 7-10.
 
 ## Instructions for future agents
 
@@ -45,6 +50,10 @@ Connection, event retrieval, and export remain planned in steps 5-10.
 - Home view: `Decathon POC/ContentView.swift`.
 - Dedicated scanner view: `Decathon POC/UI/HelmetScannerView.swift`.
 - App-owned BLE session: `Decathon POC/Core/BluetoothSession.swift`.
+- Connection preparation/consumer lifetime: `Decathon POC/Core/HelmetConnection.swift`.
+- Discovered Decathlon profile resolution: `Decathon POC/Core/DecathlonProfile.swift`.
+- Connected dashboard, preparation status, and UUID diagnostics: `Decathon POC/UI/HelmetConnectionView.swift`.
+- Typed readings and documented alert parser: `Decathon POC/Core/HelmetReadings.swift`.
 - Manufacturer parser and discovery model: `Decathon POC/Core/DiscoveredHelmet.swift`.
 - Four-field result row: `Decathon POC/UI/HelmetScanResultRow.swift`.
 - Shared native glass action: `Decathon POC/UI/POCActionButton.swift`.
@@ -163,8 +172,8 @@ only permanent copy of retrieved event data.
 - Match manufacturer data rather than the advertised name. The default name can
   appear truncated as `QuinPro080`.
 - Allow duplicate discoveries to refresh an existing row rather than adding rows.
-- Keep last-seen metadata internal and handle expired advertisements. Connection
-  attempts belong to step 5.
+- Keep last-seen metadata internal and handle expired advertisements. Step 5 adds
+  explicit connection to each result, with a 15-second connection timeout.
 - Stop scanning when connecting to the user's selected peripheral.
 
 ### Manufacturer data contract
@@ -238,7 +247,49 @@ have not been erased. Label it accordingly.
 - Guard pending scan startup and late stop callbacks so duplicate tasks and native
   power-state transitions do not incorrectly complete or replace a newer scan.
 - Log scan start, stop, completion, interruptions, discovery, and failures through
-  QuinKitLogger. Result rows are informational; connection is deferred to step 5.
+  QuinKitLogger. Step 5 adds a Connect action while preserving the four advertised
+  fields and no RSSI display.
+
+### Implemented connection preparation (step 5)
+
+- Tap Connect on a matching scan result. Stop scanning before connecting to that
+  exact CoreBluetooth identifier and push a preparation screen. Prevent duplicate
+  attempts and concurrent scanning/connection work. Reuse the app's QuinKit manager.
+- Discover all services, then each service's characteristics sequentially, with a
+  10-second timeout per discovery/subscription operation. Log full service UUIDs,
+  characteristic UUIDs, and read/write/notify/indicate capabilities.
+- The PDF supplies shorthand rather than a full vendor catalog. Resolve one
+  discovered 128-bit data service with prefix `8925D23D-`. Resolve `6166` within
+  that service, and `1002` across discovered 128-bit vendor services. Match a literal
+  16-bit characteristic or the low 16 bits of the first field of a 128-bit UUID.
+  Reject absent/multiple matches. Use the full discovered UUID/service objects;
+  do not fabricate a vendor base or search arbitrary UUID substrings.
+- This role mapping remains guide-derived and requires confirmation against the
+  actual Decathlon GATT profile on hardware before replay/erase is implemented.
+  The sibling Performance app's UUID catalog corroborates the first-field layout
+  for live data and alerts, but is not proof of the Decathlon firmware catalog.
+- Require data to support write and value updates, and alerts to support read,
+  write, and value updates. Accept notifications or indications. Prefer data
+  writes with response when supported; retain the resolved write type for later
+  replay implementation. No command write occurs in step 5.
+- Register BOTH AsyncThrowingStream consumers synchronously before enabling
+  either CCCD. Await `setNotify` for both channels and verify updated discovered
+  `isNotifying` snapshots before showing Connection Prepared. `6266` diagnostic
+  live notifications are not enabled because live mode is outside this flow.
+- Display preparation stages, channel subscription status, incoming notification
+  counts/latest alert, and an expandable full UUID/property inventory. The selected
+  identity, battery, and event count are still advertisement snapshots. Data
+  notification counts are not decoded events or saved crash data; raw persistence
+  and replay are step 7.
+- Cancel/disconnect, Back, backgrounding, unavailable Bluetooth, preparation
+  errors, or a notification-stream failure terminate the connection and consumers.
+  Invalidated attempt IDs prevent late completions from marking the session ready.
+  Do not begin another attempt until the previous async operation has settled;
+  QuinKit's discovery awaits can require their timeout after cancellation.
+- Explain double-tap/re-scan after disconnect. No automatic reconnection. No RTC,
+  retrieve/delete, calibration, configuration, or device-name writes. RTC setup
+  remains explicitly pending until its encoding is supplied. Step 6 adds the full
+  dashboard and parsed connected readings using read operations only.
 
 ## Screen 3: connected-device dashboard
 
@@ -259,6 +310,41 @@ Battery strings on alert characteristic `0x1002` use
 informational. Categories are FULL at >=90%, MEDIUM at 31-89%, and LOW at <=30%.
 Reading the characteristic returns the last battery string. A forced reading is
 documented about five seconds after connecting and on a double tap while connected.
+
+### Implemented dashboard behavior (step 6)
+
+- The same destination becomes Your Helmet: identity/connection state, battery,
+  offline events, crash thresholds, activity, Device Information, and collapsed
+  connection diagnostics. Keep a fixed bottom Cancel Connection / Disconnect glass
+  control. Back still closes the connection and returns to the scanner.
+- After both subscriptions are confirmed, read alerts once for cached battery
+  status, then read configuration and the available Device Information fields
+  sequentially. Reads use five-second timeouts and no polling. Optional read
+  failures do not disconnect an otherwise prepared session. Disconnect cancels
+  pending work; attempt IDs reject late completions after a new session begins.
+- Parse complete battery messages with a known category, percentage 0-100, and
+  finite temperature. Parse exact ACT/INACT messages and complete ten-value Temp:
+  notifications with finite values; display the last temperature in that batch.
+  Unknown/malformed messages remain diagnostics without overwriting valid readings.
+- Show the advertised battery explicitly as a scan value until a valid connected
+  status arrives. Read-based battery status is marked as cached. All received times
+  are app receipt times, not original sensor measurement or crash timestamps.
+  Do not overwrite newer notification readings with the initial cached read.
+- Resolve a unique readable 1001 configuration characteristic within the discovered
+  alert service. Require exactly ten bytes; byte 1 is major g, byte 2 is minor g.
+  Display actual stored values only, without assuming the 80/20 defaults, editing
+  configuration, resetting the device, or inventing supported value limits.
+- Read Firmware Revision (2A26), Hardware Revision (2A27), Model Number (2A24), and
+  Serial Number (2A25) only when a unique readable characteristic exists under
+  Device Information service 180A. Missing/empty/invalid text reads show Unavailable.
+- Stored Events at Scan remains an advertisement snapshot; no connected count
+  refresh or downloaded-event count is invented. Activity remains unknown until
+  reported. Notification counts in diagnostics are message counts, not event counts.
+- Keep received battery, temperature, thresholds, activity, and device information
+  visible after disconnect with an explicit historical-readings notice. Reset them
+  before connecting again. Explain possible idle sleep and double-tap/re-scan.
+- Retrieval, progress, persistence, export, and delete controls arrive in their
+  later steps; no command/configuration/RTC writes or battery-health metric is added.
 
 ## Connection preparation and protocol commands
 
@@ -425,8 +511,8 @@ Avoid unnecessary abstractions for the home, scanner, and connected-device scree
 | 2. Home screen and visual foundation | Implemented | Branded home layout, fixed top-left Quin logo header with scrolling content below, helmet guidance, native glass action component, and readable status surface | Establish the interface and keep branding visible while scrolling | Review logo placement, spacing, contrast, light/dark mode, and larger text. No fabricated readings are shown. Step 4 wires the discovery control. |
 | 3. BLE session, permissions, and diagnostics | Implemented | App-owned long-lived QuinKitBLE session; permission/power states; Settings action; return-from-Settings refresh; persistent QuinKitLogger configuration | Centralize transport ownership and distinguish denied access from Bluetooth being off | Check first-launch prompt, denial, power changes, and lifecycle behavior on a physical iPhone. Step 4 adds readiness-gated scanning; connection and firmware commands remain pending. |
 | 4. Scan and discover Decathlon devices | Implemented | Home's bottom Scan button opens a separate scanner; match company `0x0ED6` plus signature `08 08 04 B3`; rows show only name, MAC, battery, and stored events; start on scanner entry and provide stop/retry controls | Keep discovery on its own screen and identify the documented Decathlon helmet profile without connecting | No RSSI display or cutoff. Keep last-seen data internal. Stop scanning on leaving the scanner. Consider advertising window, malformed data, stale/duplicate rows, and count snapshots. Physical discovery remains unverified. |
-| 5. Connect and prepare the profile | Planned | Selected-device connection; discover/validate full vendor UUIDs and properties; register consumers; await notification setup; connection/preparation failures | Ensure the data path is ready before any replay command | Confirm full UUIDs and actual 126-byte notification delivery on hardware. Resolve RTC format; leave undocumented RTC writes pending and visible rather than guessing. |
-| 6. Connected dashboard and disconnect | Planned | Connected identity, battery/category/temperature/update time, activity, available Device Information, count labels, and disconnect | Expose sensor state and user control on one screen | No invented battery-health value or fresh-count claim. Observe idle sleep and re-advertising after disconnect. Retrieval/export/delete controls stay unavailable until their steps are implemented; later busy states must prevent mid-transfer disconnect. |
+| 5. Connect and prepare the profile | Implemented | Explicit result Connect action; preparation screen; discover full UUIDs, reject missing/ambiguous roles, validate properties; register both consumers and await confirmed notification setup; cancellation/error/lifecycle cleanup | Ensure the data path is ready before any replay command | User reports connection working; full UUID roles and 126-byte data delivery still require recorded hardware verification. RTC remains pending. Step 6 extends this screen into the dashboard. |
+| 6. Connected dashboard and disconnect | Implemented | Identity/connection status; cached battery read plus battery/temperature/activity notifications; read-only major/minor g thresholds; available Device Information; scan count labels; collapsible diagnostics; disconnect with retained historical readings | Expose sensor state and user control on one screen | No battery-health or fresh-count claim. Confirm actual readings and LightBlue threshold values on hardware. Observe idle sleep and re-advertising. Retrieval/export/delete are later steps. |
 | 7. Retrieve, decode, and preserve offline packets | Planned | Serialized `01` replay; raw packet journal persisted during reception; packet validation, event reassembly, duplicate/missing-frame tracking, decoder, end-marker handling | Retrieve events while preserving evidence immediately | Persistence is part of this step, not deferred to export. Check 64-frame completeness, signed high-g decoding, skipped transmitted records, and partial-transfer handling. Do not enable deletion yet. |
 | 8. Progress, saved downloads, and recovery UX | Planned | Event/packet progress, adaptive ETA, elapsed time, finalization and verified complete archives, saved-download access, timeout/error states, foreground screen-lock handling, busy guards | Make long downloads understandable and distinguish receipt from durable success | Approximately 80-85 seconds initially for ten events; count can be stale. Handle zero data, lost links, backgrounding, disk errors, and relaunch without promising firmware resume. Preserve complete data and clearly identify partial data. |
 | 9. PDF, CSV, and raw export | Planned | Reports and decoded sample export generated from saved records; original packet export; share sheet; export failure/retry | Make firmware results reviewable outside the app | Label download time accurately; original offline event date/time is missing from packets. Export must remain available after disconnect and must never delete sensor data. |
@@ -504,6 +590,37 @@ in this document instead of proceeding automatically through the remaining steps
   button in Device Hub and observed navigation to Nearby Helmets, native Back,
   unsupported-Bluetooth guidance, and its disabled bottom scan control.
 - Physical discovery and stopping an active scan on Back remain hardware checks.
+
+### Step 5 verification (7 October 2026)
+
+- Debug simulator build passed using the pinned QuinKit sources. `git diff --check`
+  passed. No unit tests, fixtures, or synthetic BLE results were added.
+- Source review confirmed QuinKit registers notification streams synchronously and
+  awaits the native notification-state callback in `setNotify`. Preparation also
+  checks the refreshed `isNotifying` value for each resolved channel.
+- Physical selection/connect, full Decathlon UUID mapping, property validation,
+  early notification delivery, timeout/failure messages, Cancel/Back cleanup,
+  background/power interruption, and disconnect/re-advertising are unverified.
+  Simulator compilation does not establish these BLE behaviors. The connection
+  preparation screen could not be reached with a real helmet in this environment.
+- Hardware focus: check both channels show Subscribed, compare the discovered UUID
+  inventory with LightBlue, observe an alert notification, then exercise disconnect
+  and double-tap/re-scan. Complete 126-byte data delivery is a later retrieval check.
+
+### Step 6 verification (7 October 2026)
+
+- The user reported that connection is working on hardware before this step.
+  This is user-provided evidence, not an agent-observed walkthrough or proof that
+  every notification/UUID/recovery behavior has been verified.
+- Debug simulator build and `git diff --check` passed for the dashboard and typed
+  parsers. No unit tests, mock peripherals, fixtures, or synthetic sensor readings
+  were added. No firmware-affecting commands are sent by dashboard reads.
+- Agent-observed dashboard rendering with a connected helmet, actual battery and
+  temperature formats, ACT/INACT updates, persisted threshold readback, available
+  Device Information values, and retained readings after disconnect remain pending.
+- Hardware focus: compare major/minor values with LightBlue's 1001 read; confirm
+  a connected battery notification (double-tap while connected if needed); observe
+  activity changes, unavailable optional fields, and disconnect/re-scan behavior.
 
 Manual verification should cover permission denial, Bluetooth off, advertising
 expiry, battery/count parsing, zero/one/multiple events, packet completeness,

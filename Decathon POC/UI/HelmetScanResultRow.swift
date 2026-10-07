@@ -2,6 +2,8 @@ import SwiftUI
 
 struct HelmetScanResultRow: View {
     let helmet: DiscoveredHelmet
+    var canConnect = false
+    var onConnect: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -30,11 +32,17 @@ struct HelmetScanResultRow: View {
                     eventCount
                 }
             }
+
+            if let onConnect {
+                POCActionButton(title: "Connect", systemImage: "link", prominence: .secondary, action: onConnect)
+                    .disabled(!canConnect)
+                    .accessibilityLabel("Connect to \(helmet.name), MAC \(helmet.advertisement.macAddress)")
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(20)
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 24))
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: onConnect == nil ? .combine : .contain)
     }
 
     private var battery: some View {
