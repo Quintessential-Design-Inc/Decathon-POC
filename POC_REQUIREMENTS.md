@@ -7,14 +7,18 @@ firmware behaves as described in the integration guide. It must discover the
 intended devices, connect, retrieve offline event data, preserve that data for
 inspection and export, explicitly delete the sensor's offline data, and disconnect.
 
-The user approved the implementation plan on 7 October 2026. This document records
-that plan for future AI agents. At the time of writing, the app still contains the
-starter SwiftUI screen; BLE and data handling have not been implemented or verified
-on hardware. Creating this document does not itself authorize implementation.
+The user approved the implementation plan on 7 October 2026 and then requested
+development in ten steps, one at a time, so requirements can change between steps.
+Step 1 adds the Bluetooth purpose string and primary color. The app still contains
+the starter SwiftUI screen; BLE and data handling have not been implemented or
+verified on hardware. Steps 2-10 remain planned until the user requests them.
 
 ## Instructions for future agents
 
 - Follow the latest user request and any applicable `AGENTS.md` instructions.
+- Implement only the currently requested step. After each step, explain what
+  changed, why it changed, verification performed, and notes/focus areas for the
+  user. Wait for the user's next instruction before starting another step.
 - Do not create, modify, or suggest unit tests unless the user explicitly asks.
   Do not add test targets, test files, mocks, fixtures, or testing dependencies.
 - Keep implementation focused on this POC. Optional additions below are separate
@@ -42,9 +46,31 @@ on hardware. Creating this document does not itself authorize implementation.
   before relying on an API; the branch dependency can advance.
 - At review time, the app target's minimum iOS version is 26.6. Align this with the
   physical POC phones before implementation; QuinKit's declared minimum is iOS 17.
-- The app currently generates its Info.plist and has no
-  `NSBluetoothAlwaysUsageDescription`. Add a suitable Bluetooth purpose string
-  before using Bluetooth.
+- The app generates its Info.plist. Step 1 adds
+  `INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription` to Debug and Release with:
+  "Bluetooth is used to connect to your QUIN PRO helmet and retrieve its offline
+  event data." Do not introduce a separate Info.plist while generation is enabled.
+- `AccentColor` is the single source for primary brand color `#00C8DC` in sRGB.
+  The app applies this color as its root tint.
+- The user supplied `QuinLogo` as a vector PDF image asset. Preserve the original
+  asset; use it in the home screen planned for step 2.
+
+## Visual direction
+
+- Use primary color `#00C8DC` for prominent actions, selected states, and progress.
+- Use the existing `QuinLogo` asset at the top of the home screen. The proposed
+  default is top-left; centered placement is also acceptable if the user prefers
+  it when reviewing step 2. Preserve its aspect ratio and original artwork.
+- Prefer native Liquid Glass controls, including SwiftUI `.glass` and
+  `.glassProminent` button styles where appropriate. Use system navigation and
+  sheets; use custom `glassEffect` only when it improves a specific control.
+- Keep device readings, event lists, and diagnostic text readable on normal content
+  surfaces. Avoid layering glass on every data card or on other glass surfaces.
+- Support Dynamic Type, VoiceOver, light/dark appearance, and system accessibility
+  settings. Check text contrast against cyan rather than assuming white is legible.
+- If the minimum iOS version is lowered below Liquid Glass availability, add
+  appropriate availability handling rather than using unsupported APIs.
+- Reference: [Apple's Liquid Glass guidance](https://developer.apple.com/documentation/swiftui/applying-liquid-glass-to-custom-views).
 
 ## Required user flow
 
@@ -295,22 +321,54 @@ colors are explicitly identified by the guide as requiring hardware verification
 The guide also documents open characteristics without pairing/bonding; connection
 to the selected identity is not proof of authenticated device ownership.
 
-## Suggested implementation structure and phases
+## Implementation structure and ten-step plan
 
 Use a small app-owned session coordinator with a Decathlon profile/decoder,
 transfer/reassembly component, persistent download store, and report exporter.
 SwiftUI screens should observe session state rather than own the transport lifetime.
 Avoid unnecessary abstractions for a two-screen POC.
 
-1. Confirm full UUIDs and RTC contract; align phone deployment target and add the
-   Bluetooth usage description. Keep unresolved writes explicitly pending.
-2. Implement permissions, scanner, advertisement parsing, selection, connection
-   preparation, dashboard information, and disconnect.
-3. Implement serialized offline retrieval, packet validation/reassembly, progress,
-   incremental storage, and interruption/error states.
-4. Implement raw/CSV/PDF export and explicit offline deletion with completion handling.
-5. Build for the intended iPhone and manually verify the flow against physical
-   firmware. Record observed results and limitations before claiming correctness.
+| Step | Status | Changes / deliverable | Why | User focus / notes |
+| --- | --- | --- | --- | --- |
+| 1. Project foundation | Implemented | Bluetooth purpose string in generated Info.plist for Debug/Release; `#00C8DC` AccentColor; root tint; recorded logo and Liquid Glass direction | Prepare Bluetooth access and a consistent brand color | Purpose string does not request permission by itself. Logo placement and glass controls arrive in step 2. Confirm intended iPhone OS before changing deployment target. |
+| 2. Home screen and visual foundation | Planned | Replace starter UI with branded home/scanner layout, Quin logo, scan guidance, reusable native glass action styles, and readable status/content surfaces | Establish the interface before BLE behavior is wired | Review logo placement, spacing, contrast, light/dark mode, and larger text. Do not show fabricated device readings or enabled actions that imply implemented BLE behavior. |
+| 3. BLE session, permissions, and diagnostics | Planned | App-owned long-lived QuinKitBLE session; permission/power states; Settings action; return-from-Settings refresh; configure QuinKitLogger | Centralize transport ownership and distinguish denied access from Bluetooth being off | Check first-launch prompt, denial, power changes, and lifecycle behavior. No scanning until permission and Bluetooth readiness are confirmed. |
+| 4. Scan and discover Decathlon devices | Planned | Manufacturer parser/filter; live scan results with battery, stored events, identity, RSSI, and last seen; scan/retry controls | Find only intended helmets and show useful information without connecting | Double-tap advertising window, malformed payloads, stale rows, duplicate updates, and count snapshot semantics. |
+| 5. Connect and prepare the profile | Planned | Selected-device connection; discover/validate full vendor UUIDs and properties; register consumers; await notification setup; connection/preparation failures | Ensure the data path is ready before any replay command | Confirm full UUIDs and actual 126-byte notification delivery on hardware. Resolve RTC format; leave undocumented RTC writes pending and visible rather than guessing. |
+| 6. Connected dashboard and disconnect | Planned | Connected identity, battery/category/temperature/update time, activity, available Device Information, count labels, and disconnect | Expose sensor state and user control on one screen | No invented battery-health value or fresh-count claim. Observe idle sleep and re-advertising after disconnect. Retrieval/export/delete controls stay unavailable until their steps are implemented; later busy states must prevent mid-transfer disconnect. |
+| 7. Retrieve, decode, and preserve offline packets | Planned | Serialized `01` replay; raw packet journal persisted during reception; packet validation, event reassembly, duplicate/missing-frame tracking, decoder, end-marker handling | Retrieve events while preserving evidence immediately | Persistence is part of this step, not deferred to export. Check 64-frame completeness, signed high-g decoding, skipped transmitted records, and partial-transfer handling. Do not enable deletion yet. |
+| 8. Progress, saved downloads, and recovery UX | Planned | Event/packet progress, adaptive ETA, elapsed time, finalization and verified complete archives, saved-download access, timeout/error states, foreground screen-lock handling, busy guards | Make long downloads understandable and distinguish receipt from durable success | Approximately 80-85 seconds initially for ten events; count can be stale. Handle zero data, lost links, backgrounding, disk errors, and relaunch without promising firmware resume. Preserve complete data and clearly identify partial data. |
+| 9. PDF, CSV, and raw export | Planned | Reports and decoded sample export generated from saved records; original packet export; share sheet; export failure/retry | Make firmware results reviewable outside the app | Label download time accurately; original offline event date/time is missing from packets. Export must remain available after disconnect and must never delete sensor data. |
+| 10. Explicit deletion and end-to-end device review | Planned | Separate confirmed `02` erase after verified saving; wait for erase completion marker; unknown-result handling; fresh-scan verification; complete manual device walkthrough | Finish the requested lifecycle while preventing accidental loss of unsaved data | Entire partition is erased, including possible new events. A write response is not erase completion. Record actual hardware observations, recovery limits, and build/visual verification separately. |
+
+### Per-step delivery expectations
+
+For every implemented step, provide the user with:
+
+1. What changed: concrete behavior and relevant files.
+2. Why: the requirement or firmware constraint addressed.
+3. Verification: appropriate build/source checks and any manual observations;
+   state clearly what remains unverified. Do not add unit tests.
+4. Notes and focus areas: UI choices, hardware actions, edge cases, or protocol
+   questions the user should review before the next step.
+
+The ten-step plan is adjustable between steps. Carry forward accepted user changes
+in this document instead of proceeding automatically through the remaining steps.
+
+### Step 1 verification (7 October 2026)
+
+- Debug simulator build passed with Xcode 27.0 and the resolved QuinKit dependency,
+  using a generic iOS Simulator destination and disabled code signing.
+- Inspected the generated app Info.plist and confirmed the exact Bluetooth purpose
+  string. Both Debug and Release project configurations contain the key; a Release
+  build was not run.
+- Asset catalog compilation succeeded, including the `#00C8DC` AccentColor and
+  existing Quin logo. Root SwiftUI tint compiled successfully.
+- Project plist syntax and `git diff --check` passed.
+- The sandboxed build initially failed on Xcode/SwiftPM cache and simulator-service
+  access; rerunning the same build with the required access succeeded.
+- No runtime permission prompt, physical BLE behavior, or visual appearance was
+  verified in this step. No unit tests were added or run.
 
 Manual verification should cover permission denial, Bluetooth off, advertising
 expiry, battery/count parsing, zero/one/multiple events, packet completeness,

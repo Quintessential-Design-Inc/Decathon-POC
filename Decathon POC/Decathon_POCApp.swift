@@ -12,6 +12,7 @@ struct Decathon_POCApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .tint(.accentColor)
         }
     }
 }
