@@ -11,6 +11,7 @@ import QuinKitPermissions
 
 struct ContentView: View {
     let session: BluetoothSession
+    @State private var isShowingScanner = false
 
     var body: some View {
         NavigationStack {
@@ -36,7 +37,11 @@ struct ContentView: View {
                 }
             }
             .background(Color(uiColor: .systemGroupedBackground))
+            .navigationTitle("Home")
             .toolbar(.hidden, for: .navigationBar)
+            .navigationDestination(isPresented: $isShowingScanner) {
+                HelmetScannerView(session: session)
+            }
         }
     }
 
@@ -143,18 +148,10 @@ struct ContentView: View {
     }
 
     private var discoveryAction: some View {
-        VStack(spacing: 12) {
-            POCActionButton(title: "Scan for helmets", systemImage: "magnifyingglass") {}
-                .disabled(true)
-                .opacity(0.55)
-                .accessibilityHint("Device scanning is not available in this build.")
-
-            Text("Device scanning is not available in this build.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
+        POCActionButton(title: "Scan for helmets", systemImage: "magnifyingglass") {
+            isShowingScanner = true
         }
+        .accessibilityHint("Opens the nearby helmet scanner.")
     }
 
     private func statusRow(_ title: String, value: String) -> some View {

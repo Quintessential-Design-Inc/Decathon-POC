@@ -9,11 +9,13 @@ inspection and export, explicitly delete the sensor's offline data, and disconne
 
 The user approved the implementation plan on 7 October 2026 and then requested
 development in ten steps, one at a time, so requirements can change between steps.
-Steps 1-3 are implemented: Bluetooth purpose string and primary color, branded home
-screen, and an app-owned QuinKit BLE permission/availability session with logging.
-The user requested steps 2 and 3 together. Scanning, connection, event retrieval,
-and export are not implemented or verified on hardware. Steps 4-10 remain planned
-until the user requests them.
+Steps 1-4 are implemented: Bluetooth purpose string and primary color, branded home
+screen with a fixed logo header, app-owned QuinKit BLE permission/availability
+session with logging, and Decathlon-filtered scanning on a separate screen opened
+by the home Scan button. The user requested steps 2
+and 3 together, then authorized step 4 after restricting scan rows to name, MAC,
+battery, and event count. Physical helmet discovery has not been verified.
+Connection, event retrieval, and export remain planned in steps 5-10.
 
 ## Instructions for future agents
 
@@ -41,7 +43,10 @@ until the user requests them.
   The guide has 20 pages; relevant section numbers are included below.
 - App entry point: `Decathon POC/Decathon_POCApp.swift`.
 - Home view: `Decathon POC/ContentView.swift`.
+- Dedicated scanner view: `Decathon POC/UI/HelmetScannerView.swift`.
 - App-owned BLE session: `Decathon POC/Core/BluetoothSession.swift`.
+- Manufacturer parser and discovery model: `Decathon POC/Core/DiscoveredHelmet.swift`.
+- Four-field result row: `Decathon POC/UI/HelmetScanResultRow.swift`.
 - Shared native glass action: `Decathon POC/UI/POCActionButton.swift`.
 - Xcode project: `Decathon POC.xcodeproj`.
 - The app already links `QuinKitBLE`, `QuinKitLogger`, and `QuinKitPermissions`.
@@ -67,6 +72,10 @@ until the user requests them.
   placement remains possible if requested. Preserve its aspect ratio and artwork.
 - Keep the logo header outside the scroll view. Only the introduction, Bluetooth
   status, helmet guidance, and discovery action below the header should scroll.
+- Keep the home Scan for Helmets button at the bottom of that content, after helmet
+  guidance. It navigates to a separate scanner screen; do not put scan status or
+  discovered device rows back on Home. The scanner uses native navigation/back
+  controls and a bottom Stop Scanning / Scan Again action.
 - Prefer native Liquid Glass controls, including SwiftUI `.glass` and
   `.glassProminent` button styles where appropriate. Use system navigation and
   sheets; use custom `glassEffect` only when it improves a specific control.
@@ -81,8 +90,9 @@ until the user requests them.
 ## Required user flow
 
 1. Open the app and request Bluetooth permission if it is not determined.
-2. Wait for Bluetooth to be powered on, then scan for matching Decathlon helmets.
-3. Show device identity, battery percentage, and stored event count in scan results.
+2. Tap Scan for Helmets at the bottom of Home to open the separate scanner screen.
+3. When permission and Bluetooth power are ready, scan for matching Decathlon helmets
+   and show name, MAC, battery percentage, and stored event count on that screen.
 4. Connect to the peripheral explicitly selected by the user.
 5. Navigate to a connected-device dashboard and prepare the notification channels.
 6. Show device connection state, battery information, and available device details.
@@ -132,15 +142,17 @@ only permanent copy of retrieved event data.
 - QuinKitBLE delegate callbacks update the observable Bluetooth availability state.
   Permission and power are separate; readiness requires authorization plus powered-on.
 - Returning to the active scene refreshes authorization and availability, including
-  after Settings. Permission checking does not start scans or connect to devices.
+  after Settings. Step 4 starts discovery only while the dedicated scanner screen
+  is visible and foreground Bluetooth readiness is confirmed; no connection or
+  firmware command is performed.
 - The home screen has actionable Allow Bluetooth / Open Settings controls when
   appropriate and power-off guidance with a manual refresh action. Request-pending,
   unknown, resetting, unsupported, powered-off, denied, and ready states are distinct.
-- The scan button is visibly disabled with an unavailable-in-this-build explanation.
-  Step 4 will replace this boundary with actual discovery; do not add scanning to
-  the permission/session step implicitly.
+- The home Scan button opens the scanner even when Bluetooth is unavailable, so its
+  access/readiness explanation can be viewed. Actual scanner start/stop/retry controls
+  remain readiness-gated; navigating to the screen does not bypass Bluetooth checks.
 
-## Screen 1: scanner
+## Screens 1 and 2: Home and scanner
 
 ### Permission and scanning behavior
 
@@ -151,7 +163,8 @@ only permanent copy of retrieved event data.
 - Match manufacturer data rather than the advertised name. The default name can
   appear truncated as `QuinPro080`.
 - Allow duplicate discoveries to refresh an existing row rather than adding rows.
-- Show last-seen information and handle expired advertisements/connection attempts.
+- Keep last-seen metadata internal and handle expired advertisements. Connection
+  attempts belong to step 5.
 - Stop scanning when connecting to the user's selected peripheral.
 
 ### Manufacturer data contract
@@ -172,14 +185,62 @@ Validate length before indexing. Reject nonmatching identities and handle malfor
 fields without crashing or inventing a battery value. Use CoreBluetooth's peripheral
 identifier for connection; the advertised MAC is useful device metadata.
 
-Each result should show name/fallback identity, device address, battery percentage,
-stored event count, RSSI, and last seen.
+Each result should show only device name/fallback name, advertised MAC address,
+battery percentage, and stored event count. The user explicitly removed RSSI from
+step 4; do not show signal strength or last-seen timestamps in the result row.
+Maintain last-seen metadata internally for stale-result handling.
+
+For this POC, identify the documented Decathlon helmet profile by BOTH company ID
+`0x0ED6` at offsets 0-1 and the complete `08 08 04 B3` signature at offsets 8-11.
+Company ID alone is not enough to distinguish this product. The signature denotes
+Decathlon, snowboarding, helmet, and the documented hardware/storage capabilities.
+Reject absent or truncated manufacturer data before indexing. Match by these
+bytes even when the advertised name is absent, shortened, or changed.
+
+Use QuinKitBLE discovery results and apply this manufacturer filter in the app;
+the existing QuinKit scan filter provides names/RSSI, not a company-ID criterion.
+Start with no name/service restriction so identity is decided by manufacturer data.
+RSSI must not be used as the Decathlon identity criterion.
+
+Format manufacturer bytes 2-7 as a colon-separated MAC address in their delivered
+order, for example `AA:BB:CC:DD:EE:FF`. This is the address embedded by the firmware,
+not a MAC obtained from CoreBluetooth's peripheral identifier. Keep the identifier
+internally for deduplication and future connection.
 
 The advertised event count is a snapshot of stored records at advertising start.
 It is not a live connected count and can include already transmitted records that
 have not been erased. Label it accordingly.
 
-## Screen 2: connected-device dashboard
+### Implemented scanning behavior (step 4)
+
+- Home does not scan automatically. Tapping its bottom Scan for Helmets button
+  pushes `HelmetScannerView`; entry requests a fresh scan when foreground Bluetooth
+  is ready, or waits for readiness on that screen. Each scan lasts 30 seconds; this
+  does not change the firmware's approximately 20-second advertising window.
+- The scanner's native glass action switches between Scan for Helmets, Stop Scanning,
+  and Scan Again. Starting a new scan clears the previous snapshot. Leaving the
+  scanner stops discovery, clears results, and prevents automatic restart on Home.
+- QuinKit receives broad discovery requests with no service or name restriction,
+  duplicates enabled, and `minimumRSSI: Int.min` to avoid a signal-strength cutoff.
+  The app accepts only company `0x0ED6` plus signature `08 08 04 B3`.
+- Parse only manufacturer values of at least 14 bytes. A matching identity with a
+  battery byte above 100 displays Unavailable instead of an invented percentage.
+- Deduplicate by CoreBluetooth peripheral ID, preserve discovery order, and refresh
+  the same row's name, MAC, battery, event count, and internal last-seen metadata.
+- While scanning, remove rows with no matching advertisement for 10 seconds. This
+  is a UI freshness heuristic, not proof the helmet disconnected or went to sleep.
+- On stop/timeout, retain rows as explicitly labeled last-scan snapshots. A new
+  scan, backgrounding, or lost Bluetooth availability clears obsolete rows.
+- Scanning is foreground-only. An active scan interrupted by backgrounding or lost
+  Bluetooth availability can restart when foreground readiness returns while the
+  scanner remains visible. A manual stop or completed scan does not continuously
+  restart. Reopening the scanner starts a new discovery session.
+- Guard pending scan startup and late stop callbacks so duplicate tasks and native
+  power-state transitions do not incorrectly complete or replace a newer scan.
+- Log scan start, stop, completion, interruptions, discovery, and failures through
+  QuinKitLogger. Result rows are informational; connection is deferred to step 5.
+
+## Screen 3: connected-device dashboard
 
 - Show Connecting, Preparing, Ready, and Disconnected/Error states.
 - Show identity, connection state, battery percentage/category, temperature,
@@ -356,14 +417,14 @@ to the selected identity is not proof of authenticated device ownership.
 Use a small app-owned session coordinator with a Decathlon profile/decoder,
 transfer/reassembly component, persistent download store, and report exporter.
 SwiftUI screens should observe session state rather than own the transport lifetime.
-Avoid unnecessary abstractions for a two-screen POC.
+Avoid unnecessary abstractions for the home, scanner, and connected-device screens.
 
 | Step | Status | Changes / deliverable | Why | User focus / notes |
 | --- | --- | --- | --- | --- |
 | 1. Project foundation | Implemented | Bluetooth purpose string in generated Info.plist for Debug/Release; `#00C8DC` AccentColor; root tint; recorded logo and Liquid Glass direction | Prepare Bluetooth access and a consistent brand color | Purpose string does not request permission by itself. Logo placement and glass controls arrive in step 2. Confirm intended iPhone OS before changing deployment target. |
-| 2. Home screen and visual foundation | Implemented | Branded home layout, fixed top-left Quin logo header with scrolling content below, helmet guidance, native glass action component, readable status surface, and disabled discovery control | Establish the interface and keep branding visible while scrolling | Review logo placement, spacing, contrast, light/dark mode, and larger text. No fabricated readings or working scan action are shown. |
-| 3. BLE session, permissions, and diagnostics | Implemented | App-owned long-lived QuinKitBLE session; permission/power states; Settings action; return-from-Settings refresh; persistent QuinKitLogger configuration | Centralize transport ownership and distinguish denied access from Bluetooth being off | Check first-launch prompt, denial, power changes, and lifecycle behavior on a physical iPhone. No scan or connection is started by these steps. |
-| 4. Scan and discover Decathlon devices | Planned | Manufacturer parser/filter; live scan results with battery, stored events, identity, RSSI, and last seen; scan/retry controls | Find only intended helmets and show useful information without connecting | Double-tap advertising window, malformed payloads, stale rows, duplicate updates, and count snapshot semantics. |
+| 2. Home screen and visual foundation | Implemented | Branded home layout, fixed top-left Quin logo header with scrolling content below, helmet guidance, native glass action component, and readable status surface | Establish the interface and keep branding visible while scrolling | Review logo placement, spacing, contrast, light/dark mode, and larger text. No fabricated readings are shown. Step 4 wires the discovery control. |
+| 3. BLE session, permissions, and diagnostics | Implemented | App-owned long-lived QuinKitBLE session; permission/power states; Settings action; return-from-Settings refresh; persistent QuinKitLogger configuration | Centralize transport ownership and distinguish denied access from Bluetooth being off | Check first-launch prompt, denial, power changes, and lifecycle behavior on a physical iPhone. Step 4 adds readiness-gated scanning; connection and firmware commands remain pending. |
+| 4. Scan and discover Decathlon devices | Implemented | Home's bottom Scan button opens a separate scanner; match company `0x0ED6` plus signature `08 08 04 B3`; rows show only name, MAC, battery, and stored events; start on scanner entry and provide stop/retry controls | Keep discovery on its own screen and identify the documented Decathlon helmet profile without connecting | No RSSI display or cutoff. Keep last-seen data internal. Stop scanning on leaving the scanner. Consider advertising window, malformed data, stale/duplicate rows, and count snapshots. Physical discovery remains unverified. |
 | 5. Connect and prepare the profile | Planned | Selected-device connection; discover/validate full vendor UUIDs and properties; register consumers; await notification setup; connection/preparation failures | Ensure the data path is ready before any replay command | Confirm full UUIDs and actual 126-byte notification delivery on hardware. Resolve RTC format; leave undocumented RTC writes pending and visible rather than guessing. |
 | 6. Connected dashboard and disconnect | Planned | Connected identity, battery/category/temperature/update time, activity, available Device Information, count labels, and disconnect | Expose sensor state and user control on one screen | No invented battery-health value or fresh-count claim. Observe idle sleep and re-advertising after disconnect. Retrieval/export/delete controls stay unavailable until their steps are implemented; later busy states must prevent mid-transfer disconnect. |
 | 7. Retrieve, decode, and preserve offline packets | Planned | Serialized `01` replay; raw packet journal persisted during reception; packet validation, event reassembly, duplicate/missing-frame tracking, decoder, end-marker handling | Retrieve events while preserving evidence immediately | Persistence is part of this step, not deferred to export. Check 64-frame completeness, signed high-g decoding, skipped transmitted records, and partial-transfer handling. Do not enable deletion yet. |
@@ -418,6 +479,31 @@ in this document instead of proceeding automatically through the remaining steps
   The simulator observation does not establish helmet discovery or connectivity.
 - VoiceOver labels/grouping are implemented but were not verified through a
   VoiceOver walkthrough. No unit tests were added or run.
+
+### Step 4 verification (7 October 2026)
+
+- Debug simulator build passed with the existing QuinKit dependency; `git diff
+  --check` passed. The manufacturer parser, scan lifecycle, and result row compiled.
+- Launched the actual app on the iOS 27 iPhone 17 Pro Max simulator. The fixed header,
+  nearby-helmets section, readiness explanation, and disabled scan action rendered
+  in the native unsupported-Bluetooth state.
+- No real advertisement, populated result row, 30-second scan completion, duplicate
+  refresh, stale expiry, or active-scan interruption was observed on hardware.
+  Those behaviors are implemented but require an iPhone and matching helmet.
+- No fabricated sensor results, mock advertisements, or unit tests were added.
+
+### Separate scanner navigation follow-up (7 October 2026)
+
+- Moved scanning status, readiness handling, device rows, and scan controls into
+  `HelmetScannerView`. Home's Scan button follows helmet guidance and opens that
+  screen; the Quin logo stays fixed above the home scroll content.
+- Discovery requires scanner visibility as well as foreground Bluetooth readiness.
+  Screen entry initiates scanning when ready. Screen departure stops scanning and
+  clears results; returning to Home cannot silently resume discovery.
+- Debug simulator build and `git diff --check` passed. Pressed the actual home Scan
+  button in Device Hub and observed navigation to Nearby Helmets, native Back,
+  unsupported-Bluetooth guidance, and its disabled bottom scan control.
+- Physical discovery and stopping an active scan on Back remain hardware checks.
 
 Manual verification should cover permission denial, Bluetooth off, advertising
 expiry, battery/count parsing, zero/one/multiple events, packet completeness,

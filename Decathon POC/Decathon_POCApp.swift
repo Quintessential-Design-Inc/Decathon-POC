@@ -28,6 +28,8 @@ struct Decathon_POCApp: App {
                 .onChange(of: scenePhase) { _, phase in
                     if phase == .active {
                         Task { await bluetoothSession.didBecomeActive() }
+                    } else if phase == .background {
+                        bluetoothSession.didEnterBackground()
                     }
                 }
         }
