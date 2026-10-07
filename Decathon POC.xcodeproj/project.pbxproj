@@ -6,6 +6,12 @@
 	objectVersion = 110;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		287A39B830760AA700519A43 /* QuinKitBLE in Frameworks */ = {isa = PBXBuildFile; productRef = 287A39B730760AA700519A43 /* QuinKitBLE */; };
+		287A39BA30760AA700519A43 /* QuinKitLogger in Frameworks */ = {isa = PBXBuildFile; productRef = 287A39B930760AA700519A43 /* QuinKitLogger */; };
+		287A39BC30760AA700519A43 /* QuinKitPermissions in Frameworks */ = {isa = PBXBuildFile; productRef = 287A39BB30760AA700519A43 /* QuinKitPermissions */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		287A39A53076091A00519A43 /* Decathon POC.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Decathon POC.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -22,6 +28,9 @@
 		287A39A23076091A00519A43 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			files = (
+				287A39BA30760AA700519A43 /* QuinKitLogger in Frameworks */,
+				287A39BC30760AA700519A43 /* QuinKitPermissions in Frameworks */,
+				287A39B830760AA700519A43 /* QuinKitBLE in Frameworks */,
 			);
 		};
 /* End PBXFrameworksBuildPhase section */
@@ -60,6 +69,11 @@
 				287A39A73076091A00519A43 /* Decathon POC */,
 			);
 			name = "Decathon POC";
+			packageProductDependencies = (
+				287A39B730760AA700519A43 /* QuinKitBLE */,
+				287A39B930760AA700519A43 /* QuinKitLogger */,
+				287A39BB30760AA700519A43 /* QuinKitPermissions */,
+			);
 			productName = "Decathon POC";
 			productReference = 287A39A53076091A00519A43 /* Decathon POC.app */;
 			productType = "com.apple.product-type.application";
@@ -88,6 +102,9 @@
 			);
 			mainGroup = 287A399C3076091A00519A43;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				287A39B630760AA700519A43 /* XCRemoteSwiftPackageReference "QuinKit-iOS" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 287A39A63076091A00519A43 /* Products */;
 			projectDirPath = "";
@@ -246,11 +263,13 @@
 				DEVELOPMENT_TEAM = 9H4T7NK9UH;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "Decathlon ";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.sports";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.6;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -259,12 +278,16 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "design.quintessential.Decathon-POC";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = Debug;
 		};
@@ -278,11 +301,13 @@
 				DEVELOPMENT_TEAM = 9H4T7NK9UH;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "Decathlon ";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.sports";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.6;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -291,12 +316,16 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "design.quintessential.Decathon-POC";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = Release;
 		};
@@ -320,6 +349,35 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		287A39B630760AA700519A43 /* XCRemoteSwiftPackageReference "QuinKit-iOS" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/Quintessential-Design-Inc/QuinKit-iOS";
+			requirement = {
+				branch = main;
+				kind = branch;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		287A39B730760AA700519A43 /* QuinKitBLE */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 287A39B630760AA700519A43 /* XCRemoteSwiftPackageReference "QuinKit-iOS" */;
+			productName = QuinKitBLE;
+		};
+		287A39B930760AA700519A43 /* QuinKitLogger */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 287A39B630760AA700519A43 /* XCRemoteSwiftPackageReference "QuinKit-iOS" */;
+			productName = QuinKitLogger;
+		};
+		287A39BB30760AA700519A43 /* QuinKitPermissions */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 287A39B630760AA700519A43 /* XCRemoteSwiftPackageReference "QuinKit-iOS" */;
+			productName = QuinKitPermissions;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 287A399D3076091A00519A43 /* Project object */;
 	validationLevel = 1;

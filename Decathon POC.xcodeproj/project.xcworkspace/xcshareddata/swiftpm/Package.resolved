@@ -1,0 +1,15 @@
+{
+  "originHash" : "0640335138b4bec8a9dad8db173f5056e9834d786c927c6c71bd03b8366e60d5",
+  "pins" : [
+    {
+      "identity" : "quinkit-ios",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/Quintessential-Design-Inc/QuinKit-iOS",
+      "state" : {
+        "branch" : "main",
+        "revision" : "9deea2211df2667164d203d0e8f28f9955fab5f0"
+      }
+    }
+  ],
+  "version" : 3
+}
