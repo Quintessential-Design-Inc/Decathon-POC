@@ -2,19 +2,27 @@ import Foundation
 
 nonisolated struct CrashPacket: Sendable {
     static let endMarker = Data([0x01, 0x33, 0x55, 0xAA])
+    static let byteCount = 130
+    static let sampleOffset = 10
     let raw: Data
     let frame: Int
     let sensorType: UInt8
     let packetType: UInt8
     let crashID: String
+    /// Raw firmware value from bytes 6–9; time units are not assumed here.
+    let imuTimestampRaw: UInt32
 
     init(data: Data) throws {
-        guard data.count == 126 else { throw ProfileError("Expected 126 bytes, received \(data.count).") }
+        guard data.count == Self.byteCount else {
+            throw ProfileError("Expected \(Self.byteCount) bytes, received \(data.count).")
+        }
         let bytes = Array(data)
         frame = Int(bytes[0])
         sensorType = bytes[1]
         packetType = bytes[2]
         crashID = bytes[3...5].map { String(format: "%02X", $0) }.joined()
+        imuTimestampRaw = UInt32(bytes[6]) | (UInt32(bytes[7]) << 8) |
+            (UInt32(bytes[8]) << 16) | (UInt32(bytes[9]) << 24)
         guard (1...64).contains(frame), sensorType == (frame <= 60 ? 0x01 : 0x02) else {
             throw ProfileError("Invalid frame number or sensor type.")
         }
@@ -41,9 +49,12 @@ nonisolated struct CrashPacket: Sendable {
 nonisolated struct CrashRecord: Sendable {
     let ordinal: Int
     let crashID: String
+    let imuTimestampRaw: UInt32
     let packetType: UInt8
     let classification: String
     let firstReceivedAt: Date
+    let imuClockAnchor: IMUClockAnchor?
+    private let timeEstimate: IMUClockTimeEstimate
     var lastReceivedAt: Date
     var frames: [Int: Data] = [:]
     var duplicateCount = 0
@@ -52,19 +63,27 @@ nonisolated struct CrashRecord: Sendable {
 
     var missingFrames: [Int] { (1...64).filter { frames[$0] == nil } }
     var isComplete: Bool { frames.count == 64 && conflictingFrames.isEmpty && !inconsistentHeader }
+    var estimatedCrashAt: Date? { inconsistentHeader ? nil : timeEstimate.date }
+    var timeStatus: IMUClockTimeStatus { inconsistentHeader ? .inconsistentHeader : timeEstimate.status }
 
-    init(packet: CrashPacket, ordinal: Int, receivedAt: Date) {
+    init(packet: CrashPacket, ordinal: Int, receivedAt: Date, clockAnchor: IMUClockAnchor? = nil) {
         self.ordinal = ordinal
         crashID = packet.crashID
+        imuTimestampRaw = packet.imuTimestampRaw
         packetType = packet.packetType
         classification = packet.classification
         firstReceivedAt = receivedAt
+        imuClockAnchor = clockAnchor
+        timeEstimate = clockAnchor?.estimateCrashTime(rawTimestamp: packet.imuTimestampRaw)
+            ?? IMUClockTimeEstimate(date: nil, status: .clockUnavailable)
         lastReceivedAt = receivedAt
     }
 
     mutating func add(_ packet: CrashPacket, at date: Date) {
         lastReceivedAt = date
-        if packet.packetType != packetType { inconsistentHeader = true }
+        if packet.packetType != packetType || packet.imuTimestampRaw != imuTimestampRaw {
+            inconsistentHeader = true
+        }
         if let existing = frames[packet.frame] {
             if existing == packet.raw { duplicateCount += 1 }
             else { conflictingFrames.insert(packet.frame) }
@@ -81,7 +100,7 @@ nonisolated struct CrashRecord: Sendable {
             let bytes = Array(data)
             if frame <= 60 {
                 for sample in 0..<10 {
-                    let offset = 6 + sample * 12
+                    let offset = CrashPacket.sampleOffset + sample * 12
                     let gx = Self.signed16(bytes, offset), gy = Self.signed16(bytes, offset + 2), gz = Self.signed16(bytes, offset + 4)
                     let index = ((frame <= 30 ? frame - 1 : frame - 31) * 10) + sample
                     imu.append(DecodedIMUSample(
@@ -96,7 +115,7 @@ nonisolated struct CrashRecord: Sendable {
                 }
             } else {
                 for sample in 0..<20 {
-                    let offset = 6 + sample * 6
+                    let offset = CrashPacket.sampleOffset + sample * 6
                     let index = (frame - 61) * 20 + sample
                     highG.append(DecodedHighGSample(
                         frame: frame, indexWithinBlock: index, secondsFromBlockStart: Double(index) / 1000,
@@ -105,7 +124,9 @@ nonisolated struct CrashRecord: Sendable {
                 }
             }
         }
-        return DecodedCrashRecord(crashID: crashID, ordinal: ordinal, imu: imu, highG: highG)
+        return DecodedCrashRecord(crashID: crashID, ordinal: ordinal, imuTimestampRaw: imuTimestampRaw,
+                                  estimatedCrashAt: estimatedCrashAt, timeStatus: timeStatus,
+                                  imu: imu, highG: highG)
     }
 
     private static func signed16(_ bytes: [UInt8], _ offset: Int) -> Int16 {
@@ -124,10 +145,11 @@ nonisolated struct CrashRecordAssembler: Sendable {
     var uniqueFrameCount: Int { records.reduce(0) { $0 + $1.frames.count } }
     var duplicateCount: Int { records.reduce(0) { $0 + $1.duplicateCount } }
 
-    mutating func add(_ packet: CrashPacket, at date: Date) {
+    mutating func add(_ packet: CrashPacket, at date: Date, clockAnchor: IMUClockAnchor? = nil) {
         if records.last == nil || records.last?.crashID != packet.crashID ||
             (packet.frame == 1 && (records.last?.frames.count == 64 || records.last?.frames[1] == nil)) {
-            records.append(CrashRecord(packet: packet, ordinal: records.count + 1, receivedAt: date))
+            records.append(CrashRecord(packet: packet, ordinal: records.count + 1,
+                                       receivedAt: date, clockAnchor: clockAnchor))
         }
         let index = records.count - 1
         records[index].add(packet, at: date)
@@ -137,6 +159,9 @@ nonisolated struct CrashRecordAssembler: Sendable {
 nonisolated struct DecodedCrashRecord: Codable, Equatable, Sendable {
     let crashID: String
     let ordinal: Int
+    let imuTimestampRaw: UInt32
+    let estimatedCrashAt: Date?
+    let timeStatus: IMUClockTimeStatus
     let imu: [DecodedIMUSample]
     let highG: [DecodedHighGSample]
 }

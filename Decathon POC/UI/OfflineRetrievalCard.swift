@@ -15,7 +15,7 @@ struct OfflineRetrievalCard: View {
             HStack(spacing: 12) {
                 Text(operationTitle).font(.subheadline.weight(.semibold))
                 Spacer(minLength: 0)
-                if retrieval.isBusy || connection.csvExportID != nil { ProgressView().accessibilityLabel(operationTitle) }
+                if retrieval.isBusy || connection.imuClock.isBusy || connection.csvExportID != nil { ProgressView().accessibilityLabel(operationTitle) }
             }
             if retrieval.sessionID != nil {
                 TimelineView(.periodic(from: .now, by: 1)) { context in transferProgress(at: context.date) }
@@ -30,6 +30,9 @@ struct OfflineRetrievalCard: View {
                 }
             }
             Text(message).font(.footnote).foregroundStyle(.secondary)
+            if let issue = retrieval.clockIssue {
+                Text("Crash time unavailable: \(issue)").font(.footnote).foregroundStyle(.secondary)
+            }
             if let notice = connection.sessionDataNotice { Text(notice).font(.footnote).foregroundStyle(.secondary) }
             if connection.isReadingDashboard {
                 Text("Waiting for initial device reads to finish.").font(.footnote).foregroundStyle(.secondary)
@@ -45,6 +48,15 @@ struct OfflineRetrievalCard: View {
                 exportCSV()
             }.disabled(!connection.canExportCSV)
             if let exportMessage { Text(exportMessage).font(.footnote).foregroundStyle(.secondary) }
+
+            POCActionButton(title: "Reset IMU clock", systemImage: "arrow.counterclockwise", prominence: .secondary) {
+                Task { await connection.resetIMUClock() }
+            }.disabled(!connection.canResetIMUClock)
+            Text("Use after exporting to start a new IMU clock reference. Downloaded data stays available for this connection.")
+                .font(.footnote).foregroundStyle(.secondary)
+            if let result = connection.imuClock.resetMessage {
+                Text(result).font(.footnote).foregroundStyle(.secondary)
+            }
 
             Button(role: .destructive) { isConfirmingDelete = true } label: {
                 Label("Delete from helmet", systemImage: "trash")
@@ -64,6 +76,12 @@ struct OfflineRetrievalCard: View {
                                 Text("Event \(event.ordinal) · \(event.classification)").font(.subheadline.weight(.semibold))
                                 Text("ID \(event.crashID) · \(event.frames.count)/64 frames · \(event.isComplete ? "Complete" : "Partial / conflicting")")
                                     .font(.caption.monospaced())
+                                if let date = event.estimatedCrashAt {
+                                    Text("Estimated crash time: \(date.formatted(date: .abbreviated, time: .standard))")
+                                        .font(.caption)
+                                } else {
+                                    Text("Estimated crash time unavailable").font(.caption).foregroundStyle(.secondary)
+                                }
                                 if !event.missingFrames.isEmpty { Text("Missing: \(event.missingFrames.map(String.init).joined(separator: ", "))").font(.caption) }
                                 if !event.conflictingFrames.isEmpty { Text("Conflicting: \(event.conflictingFrames.sorted().map(String.init).joined(separator: ", "))").font(.caption) }
                             }
@@ -120,6 +138,7 @@ struct OfflineRetrievalCard: View {
     }
 
     private var operationTitle: String {
+        if connection.imuClock.isResetting { return "Resetting IMU clock" }
         if connection.csvExportID != nil { return "Exporting CSV" }
         switch retrieval.deletionPhase {
         case .waitingForCompletion: return "Deleting offline data"
@@ -142,6 +161,7 @@ struct OfflineRetrievalCard: View {
         }
         switch retrieval.phase {
         case .idle: return "Connect, retrieve once, export CSV, then optionally delete the helmet's offline data."
+        case .synchronizingClock: return "Reading the helmet clock before downloading events. Keep the app open."
         case .receiving: return "Keep the app open. Data is held in memory; Back and Disconnect are unavailable during transfer."
         case .finishing: return "Checking received event frames."
         case .completed: return retrieval.records.isEmpty

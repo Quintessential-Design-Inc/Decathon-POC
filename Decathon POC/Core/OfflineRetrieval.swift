@@ -26,8 +26,10 @@ final class OfflineRetrieval {
     private(set) var finishedAt: Date?
     private(set) var observedPacketInterval: TimeInterval = 0.12
     private(set) var timingObservationCount = 0
+    private(set) var clockIssue: String?
 
     @ObservationIgnored private var assembler = CrashRecordAssembler()
+    @ObservationIgnored private var clockAnchor: IMUClockAnchor?
     @ObservationIgnored private var lastUniquePacketAt: Date?
     @ObservationIgnored private var requestStartedAt: Date?
     @ObservationIgnored private var operationID = UUID()
@@ -37,7 +39,7 @@ final class OfflineRetrieval {
 
     deinit { watchdog?.cancel() }
 
-    var isBusy: Bool { phase == .receiving || phase == .finishing || deletionPhase == .waitingForCompletion || isCommandPending }
+    var isBusy: Bool { phase == .synchronizingClock || phase == .receiving || phase == .finishing || deletionPhase == .waitingForCompletion || isCommandPending }
     var completeEventCount: Int { records.filter(\.isComplete).count }
     var partialEventCount: Int { records.filter { !$0.isComplete }.count }
     var hasUsableEstimate: Bool {
@@ -74,6 +76,8 @@ final class OfflineRetrieval {
         duplicatePacketCount = 0
         records = []
         assembler = CrashRecordAssembler()
+        clockAnchor = nil
+        clockIssue = nil
         currentFrameCount = 0
         sessionID = nil
         requiresReconnect = false
@@ -90,7 +94,7 @@ final class OfflineRetrieval {
         requestStartedAt = nil
     }
 
-    func start(advertisedCount: Int, peripheral: QKPeripheral, profile: DecathlonProfile) async {
+    func start(advertisedCount: Int, peripheral: QKPeripheral, profile: DecathlonProfile, imuClock: HelmetIMUClock) async {
         guard phase == .idle, !isBusy, !requiresReconnect else { return }
         sessionID = UUID()
         operationID = UUID()
@@ -100,11 +104,6 @@ final class OfflineRetrieval {
         keepScreenAwake()
         do {
             try validateChannels(peripheral, profile)
-            // Arm reception before writing: an empty replay can end immediately.
-            phase = .receiving
-            lastNotificationAt = Date()
-            requestStartedAt = lastNotificationAt
-            startWatchdog(operation: operation, deleting: false)
             isCommandPending = true
             defer {
                 if operationID == operation {
@@ -112,6 +111,30 @@ final class OfflineRetrieval {
                     if phase != .receiving { restoreIdleTimer() }
                 }
             }
+            phase = .synchronizingClock
+            do {
+                let anchor = try await imuClock.synchronize {
+                    guard peripheral.isConnected else { throw ProfileError("The helmet disconnected before clock synchronization.") }
+                    try await peripheral.writeValue(Data([0x0A]), for: profile.alerts,
+                                                    type: profile.alertWriteType, timeout: 5)
+                }
+                guard operationID == operation, !Task.isCancelled else { return }
+                clockAnchor = anchor
+                clockIssue = nil
+                QKLog.debug(tag: "IMUClock", "Retrieval clock anchor", anchor.counterRaw,
+                            "phone_received_at", anchor.receivedAt.timeIntervalSince1970,
+                            "request_seconds", anchor.requestDuration, "seconds_per_tick", anchor.secondsPerTick)
+            } catch {
+                guard operationID == operation, !Task.isCancelled else { return }
+                clockIssue = error.localizedDescription
+                QKLog.debug(tag: "IMUClock", "Clock unavailable; retaining raw crash data", clockIssue)
+            }
+            try validateChannels(peripheral, profile)
+            // Arm reception before writing: an empty replay can end immediately.
+            phase = .receiving
+            lastNotificationAt = Date()
+            requestStartedAt = lastNotificationAt
+            startWatchdog(operation: operation, deleting: false)
             QKLog.debug(tag: "Offline", "Requesting session-only offline data", profile.data.id)
             try await peripheral.writeValue(Data([0x01]), for: profile.data, type: profile.dataWriteType, timeout: 10)
         } catch {
@@ -146,7 +169,7 @@ final class OfflineRetrieval {
         receivedPacketCount += 1
         let previousUniqueCount = uniquePacketCount
         let previousEventCount = eventsStarted
-        assembler.add(packet, at: date)
+        assembler.add(packet, at: date, clockAnchor: clockAnchor)
         records = assembler.records
         uniquePacketCount = assembler.uniqueFrameCount
         eventsStarted = records.count
@@ -252,11 +275,12 @@ final class OfflineRetrieval {
 }
 
 enum OfflineRetrievalPhase: Equatable {
-    case idle, receiving, finishing, completed
+    case idle, synchronizingClock, receiving, finishing, completed
     case failed(String)
     var title: String {
         switch self {
         case .idle: "Ready to retrieve"
+        case .synchronizingClock: "Reading IMU clock"
         case .receiving: "Retrieving offline data"
         case .finishing: "Checking received frames"
         case .completed: "Replay finished"

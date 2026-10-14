@@ -28,6 +28,8 @@ final class HelmetConnection {
     private(set) var deviceInformationIssues: [HelmetDeviceInfoField: String] = [:]
     private(set) var isReadingDashboard = false
     let retrieval = OfflineRetrieval()
+    let imuClock = HelmetIMUClock()
+    let ledColor = HelmetLEDColor()
     private(set) var csvExportID: UUID?
     private(set) var sessionDataNotice: String?
 
@@ -45,26 +47,29 @@ final class HelmetConnection {
     }
 
     var canSelectHelmet: Bool {
-        !isOperationRunning && !retrieval.isBusy && csvExportID == nil && peripheral == nil && (manager?.connectedPeripherals.isEmpty ?? true)
+        !isOperationRunning && !retrieval.isBusy && !imuClock.isBusy && !ledColor.isSending && csvExportID == nil && peripheral == nil && (manager?.connectedPeripherals.isEmpty ?? true)
     }
 
     var canRetrieveOfflineData: Bool {
         phase == .ready && !isReadingDashboard && csvExportID == nil && retrieval.phase == .idle && !retrieval.isBusy && !retrieval.requiresReconnect &&
+            !imuClock.isBusy && !imuClock.resetRequiresReconnect && !ledColor.isSending &&
             peripheral?.isConnected == true && profile != nil &&
             enabledNotificationIDs.count == 2 && (thresholds.map { $0.crashMode & 0x02 == 0 } ?? true)
     }
 
     func retrieveOfflineData() async {
         guard canRetrieveOfflineData, let helmet, let peripheral, let profile else { return }
-        await retrieval.start(advertisedCount: helmet.advertisement.storedEventCount, peripheral: peripheral, profile: profile)
+        await retrieval.start(advertisedCount: helmet.advertisement.storedEventCount,
+                              peripheral: peripheral, profile: profile, imuClock: imuClock)
     }
 
     var canExportCSV: Bool {
-        phase == .ready && !retrieval.isBusy && csvExportID == nil && !retrieval.records.isEmpty
+        phase == .ready && !retrieval.isBusy && !imuClock.isBusy && !ledColor.isSending && csvExportID == nil && !retrieval.records.isEmpty
     }
 
     var canDeleteOfflineData: Bool {
         phase == .ready && csvExportID == nil && !retrieval.isBusy && !retrieval.requiresReconnect &&
+            !imuClock.isBusy && !imuClock.resetRequiresReconnect && !ledColor.isSending &&
             retrieval.phase == .completed && retrieval.receivedEndMarker && retrieval.deletionPhase == .idle &&
             peripheral?.isConnected == true && profile != nil
     }
@@ -72,6 +77,57 @@ final class HelmetConnection {
     func deleteOfflineData() async {
         guard canDeleteOfflineData, let peripheral, let profile else { return }
         await retrieval.deleteOfflineData(peripheral: peripheral, profile: profile)
+    }
+
+    var canResetIMUClock: Bool {
+        phase == .ready && !isOperationRunning && !isReadingDashboard && csvExportID == nil &&
+            !retrieval.isBusy && !retrieval.requiresReconnect && !imuClock.isBusy && !imuClock.resetRequiresReconnect && !ledColor.isSending &&
+            peripheral?.isConnected == true && profile != nil && enabledNotificationIDs.count == 2
+    }
+
+    func resetIMUClock() async {
+        guard canResetIMUClock, let peripheral, let profile else { return }
+        let attempt = attemptID
+        await imuClock.reset {
+            try self.checkAttempt(attempt)
+            guard peripheral.characteristic(serviceUUID: profile.alerts.serviceUUID, uuid: profile.alerts.uuid)?.isNotifying == true else {
+                throw ProfileError("IMU clock notifications are not enabled.")
+            }
+            QKLog.debug(tag: "IMUClock", "User requested counter reset; writing 09", profile.alerts.id)
+            try await peripheral.writeValue(Data([0x09]), for: profile.alerts, type: profile.alertWriteType, timeout: 5)
+            try self.checkAttempt(attempt)
+        } readCurrent: {
+            try self.checkAttempt(attempt)
+            QKLog.debug(tag: "IMUClock", "Verifying reset; writing 0A", profile.alerts.id)
+            try await peripheral.writeValue(Data([0x0A]), for: profile.alerts, type: profile.alertWriteType, timeout: 5)
+            try self.checkAttempt(attempt)
+        }
+        guard attemptID == attempt else { return }
+        QKLog.debug(tag: "IMUClock", "Reset result", imuClock.resetMessage)
+    }
+
+    var canSetLEDColor: Bool {
+        phase == .ready && !isOperationRunning && !isReadingDashboard && csvExportID == nil &&
+            !retrieval.isBusy && !retrieval.requiresReconnect && !imuClock.isBusy && !imuClock.resetRequiresReconnect &&
+            !ledColor.isSending && peripheral?.isConnected == true && profile != nil && enabledNotificationIDs.count == 2
+    }
+
+    func setLEDColor(_ color: HelmetRGBColor) async {
+        guard canSetLEDColor, let peripheral, let profile else { return }
+        let attempt = attemptID
+        await ledColor.send(color) {
+            try self.checkAttempt(attempt)
+            guard peripheral.characteristic(serviceUUID: profile.alerts.serviceUUID, uuid: profile.alerts.uuid)?.isNotifying == true else {
+                throw ProfileError("LED colour notifications are not enabled.")
+            }
+            let data = color.commandData
+            let hex = data.map { String(format: "%02X", $0) }.joined(separator: " ")
+            QKLog.debug(tag: "LEDColor", "Setting colour", color.summary, "hex", hex, profile.alerts.id)
+            try await peripheral.writeValue(data, for: profile.alerts, type: profile.alertWriteType, timeout: 5)
+            try self.checkAttempt(attempt)
+        }
+        guard attemptID == attempt else { return }
+        QKLog.debug(tag: "LEDColor", "Colour result", ledColor.message)
     }
 
     func beginCSVExport() -> (UUID, SessionCSVSnapshot)? {
@@ -110,6 +166,8 @@ final class HelmetConnection {
         deviceInformationIssues = [:]
         isReadingDashboard = false
         retrieval.clearSession()
+        imuClock.clearSession()
+        ledColor.clearSession()
         sessionDataNotice = nil
         let id = UUID()
         attemptID = id
@@ -218,14 +276,24 @@ final class HelmetConnection {
             do {
                 for try await value in stream {
                     guard !Task.isCancelled, let self, self.attemptID == attempt else { return }
+                    let receivedAt = Date()
+                    #if DEBUG
+                    // Capture before parsing so changed layouts and separate metadata remain visible.
+                    let rawHex = value.map { String(format: "%02X", $0) }.joined(separator: " ")
+                    QKLog.debug(tag: "BLECapture", "Notification", peripheral.id,
+                                characteristic.id, "received_at", receivedAt.timeIntervalSince1970,
+                                "bytes", value.count, "hex", rawHex)
+                    #endif
                     if isData {
                         self.dataNotificationCount += 1
-                        self.retrieval.receive(value, at: Date())
+                        self.retrieval.receive(value, at: receivedAt)
                         QKLog.debug(tag: "Notifications", "Data notification received", value.count, self.dataNotificationCount)
                     } else {
                         self.alertNotificationCount += 1
                         self.lastAlert = String(data: value.prefix(512), encoding: .utf8) ?? "Non-text alert (\(value.count) bytes)"
-                        self.receiveAlert(value, at: Date(), fromRead: false)
+                        self.imuClock.receive(value, at: receivedAt)
+                        self.ledColor.receive(value)
+                        self.receiveAlert(value, at: receivedAt, fromRead: false)
                         QKLog.debug(tag: "Notifications", "Alert received", self.lastAlert ?? "", self.alertNotificationCount)
                     }
                 }
@@ -334,6 +402,8 @@ final class HelmetConnection {
                 : "Connection ended. Retrieved session data was cleared from memory."
         }
         retrieval.clearSession()
+        imuClock.clearSession()
+        ledColor.clearSession()
         attemptID = UUID()
         preparationTask?.cancel()
         dashboardReadTask?.cancel()

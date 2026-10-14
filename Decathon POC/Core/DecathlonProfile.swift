@@ -11,6 +11,10 @@ struct DecathlonProfile {
         data.supportsWriteWithResponse ? .withResponse : .withoutResponse
     }
 
+    var alertWriteType: CBCharacteristicWriteType {
+        alerts.supportsWriteWithResponse ? .withResponse : .withoutResponse
+    }
+
     init(services: [QKService]) throws {
         let dataServices = services.filter {
             $0.uuid.data.count == 16 && $0.uuid.uuidString.uppercased().hasPrefix("8925D23D-")

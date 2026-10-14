@@ -18,6 +18,7 @@ struct HelmetConnectionView: View {
                 }
 
                 batteryCard
+                LEDColorCard(connection: connection)
                 eventsCard
                 OfflineRetrievalCard(connection: connection)
                 thresholdsCard
@@ -37,7 +38,7 @@ struct HelmetConnectionView: View {
                     systemImage: "xmark",
                     prominence: .secondary
                 ) { connection.disconnect() }
-                    .disabled(connection.retrieval.isBusy || connection.csvExportID != nil)
+                    .disabled(connection.retrieval.isBusy || connection.imuClock.isBusy || connection.ledColor.isSending || connection.csvExportID != nil)
                     .padding(.horizontal, 24)
                     .padding(.vertical, 16)
                     .frame(maxWidth: 560)
@@ -47,7 +48,7 @@ struct HelmetConnectionView: View {
         }
         .navigationTitle("Your helmet")
         .navigationBarTitleDisplayMode(.inline)
-        .navigationBarBackButtonHidden(connection.retrieval.isBusy || connection.csvExportID != nil)
+        .navigationBarBackButtonHidden(connection.retrieval.isBusy || connection.imuClock.isBusy || connection.ledColor.isSending || connection.csvExportID != nil)
         .toolbar(.visible, for: .navigationBar)
         .onDisappear {
             // A sharing presentation can cover this screen; its payload belongs
